@@ -15,5 +15,6 @@ frontend/dist/
 *.pyc
 *.pyo
 *.log
+*.dump
 *.docx
 ~$*

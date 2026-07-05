@@ -32,3 +32,55 @@ body { @apply bg-paper text-ink antialiased; }
 table {
   @apply border-collapse;
 }
+
+.btn-sm {
+  @apply !px-2.5 !py-1 text-xs;
+}
+
+.card-head {
+  @apply px-5 py-3.5 border-b border-rule flex items-center gap-3;
+}
+
+.card-title {
+  @apply font-semibold text-[15px];
+}
+
+.tbl {
+  @apply w-full text-sm border-collapse;
+}
+
+.tbl thead th {
+  @apply text-left text-[11px] font-semibold uppercase text-ink/50 bg-paper border-b border-rule px-3 py-2.5 whitespace-nowrap;
+}
+
+.tbl tbody td {
+  @apply px-3 py-2 border-b border-rule/50 align-middle;
+}
+
+.badge {
+  @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium;
+}
+
+.badge-green {
+  @apply badge bg-ledger/10 text-ledger;
+}
+
+.badge-red {
+  @apply badge bg-red-50 text-red-700;
+}
+
+.modal-overlay {
+  @apply fixed inset-0 bg-ink/40 flex items-start justify-center overflow-auto p-6 z-20;
+}
+
+.notice-ok {
+  @apply flex items-start gap-2 text-sm text-ledger bg-ledger/[0.07] border border-ledger/20 rounded-md px-3 py-2;
+}
+
+.notice-err {
+  @apply flex items-start gap-2 text-sm text-red-800 bg-red-50 border border-red-200 rounded-md px-3 py-2;
+}
+
+.skeleton {
+  @apply animate-pulse bg-ink/[0.06] rounded;
+}

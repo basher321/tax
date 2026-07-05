@@ -52,6 +52,8 @@ class ImportBatchOut(ORM):
     error_rows: int
     created_at: datetime
     errors: list[ImportErrorOut] = []
+    rows: list[dict] | None = None
+    columns: list[str] | None = None
 
 
 class CertLineOut(ORM):

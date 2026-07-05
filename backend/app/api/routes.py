@@ -2,8 +2,9 @@
 import os
 import shutil
 import tempfile
-from datetime import date
+from datetime import date, datetime
 
+import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_
@@ -49,7 +50,7 @@ from ..services.certificate_generator import (
 )
 from ..services.dispatch import DispatchBlocked, enqueue_dispatch, process_queue
 from ..services.dispatch.whatsapp_sender import verify_certificate_sig
-from ..services.excel_import import import_challan_file, import_depot_workbook
+from ..services.excel_import import import_depot_workbook, load_depot_sheet
 from ..services.numbering import get_numbering_config
 from ..services.validation import check_certificate
 
@@ -68,18 +69,27 @@ def _save_upload(upload: UploadFile) -> str:
 def upload_depot(file: UploadFile = File(...), db: Session = Depends(get_db)):
     path = _save_upload(file)
     try:
-        return import_depot_workbook(db, path, file.filename or "upload.xlsx")
+        batch = import_depot_workbook(db, path, file.filename or "upload.xlsx")
+        df = load_depot_sheet(path)
+        columns = [c for c in df.columns if c != "__excel_row"]
+        rows = []
+        for _, r in df.iterrows():
+            row = {"__excel_row": int(r["__excel_row"])}
+            for c in columns:
+                v = r.get(c)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    row[c] = ""
+                elif isinstance(v, (pd.Timestamp, datetime, date)):
+                    row[c] = v.strftime("%d/%m/%Y")
+                else:
+                    row[c] = str(v)
+            rows.append(row)
+        out = ImportBatchOut.model_validate(batch)
+        out.rows = rows
+        out.columns = columns
+        return out
     except ValueError as e:
         raise HTTPException(422, str(e))
-    finally:
-        os.unlink(path)
-
-
-@router.post("/import/challan", response_model=ImportBatchOut)
-def upload_challan(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    path = _save_upload(file)
-    try:
-        return import_challan_file(db, path, file.filename or "challan.xlsx")
     finally:
         os.unlink(path)
 
@@ -221,8 +231,43 @@ def dispatch(cert_id: int, req: DispatchRequest, db: Session = Depends(get_db)):
                     "anomalies": [{"code": a.code, "message": a.message}
                                   for a in e.anomalies]},
         )
-    return [{"id": j.id, "recipient": j.recipient, "status": j.status.value}
-            for j in jobs]
+    return [{"id": j.id, "recipient": j.recipient, "status": j.status.value,
+             "error": j.last_error} for j in jobs]
+
+
+@router.get("/certificates/{cert_id}/whatsapp-links")
+def whatsapp_links(cert_id: int, db: Session = Depends(get_db)):
+    """Build free WhatsApp Click-to-Chat links with a signed PDF URL."""
+    from urllib.parse import quote
+    from ..services.dispatch.whatsapp_sender import signed_certificate_url
+
+    cert = db.get(Certificate, cert_id)
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+    if not cert.pdf_path or not os.path.exists(cert.pdf_path):
+        raise HTTPException(422, "Certificate PDF has not been rendered yet")
+
+    org = get_org_settings(db)
+    doc_url = signed_certificate_url(cert)
+    message = (
+        f"Dear {cert.supplier.name},\n\n"
+        f"Your Certificate of Deduction of Tax {cert.certificate_no} "
+        f"for the period {cert.period} is ready.\n"
+        f"Download it here: {doc_url}\n\n"
+        f"Regards,\n{org.officer_name or ''}"
+        + (f"\n{org.company_name}" if org.company_name else "")
+    )
+    numbers = [c.value for c in cert.supplier.contacts
+               if c.kind == ContactKind.WHATSAPP]
+    links = []
+    for number in numbers:
+        digits = "".join(ch for ch in number if ch.isdigit())
+        if digits:
+            links.append({
+                "recipient": number,
+                "url": f"https://wa.me/{digits}?text={quote(message)}",
+            })
+    return {"links": links, "document_url": doc_url, "message": message}
 
 
 @router.post("/dispatch/process")
@@ -308,6 +353,22 @@ def upload_seal(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if file.content_type not in ("image/png", "image/jpeg"):
         raise HTTPException(422, "Upload a PNG (preferred, supports transparency) or JPEG")
     return _store_image(db, file, "seal_signature_path", "seal_signature")
+
+
+@router.get("/settings/org/logo")
+def get_logo(db: Session = Depends(get_db)):
+    org = get_org_settings(db)
+    if not org.logo_path or not os.path.exists(org.logo_path):
+        raise HTTPException(404, "No logo uploaded")
+    return FileResponse(org.logo_path)
+
+
+@router.get("/settings/org/seal")
+def get_seal(db: Session = Depends(get_db)):
+    org = get_org_settings(db)
+    if not org.seal_signature_path or not os.path.exists(org.seal_signature_path):
+        raise HTTPException(404, "No seal/signature uploaded")
+    return FileResponse(org.seal_signature_path)
 
 
 def _store_image(db: Session, file: UploadFile, attr: str, name: str):

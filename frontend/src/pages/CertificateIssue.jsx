@@ -12,6 +12,7 @@ function Preview({ certId, onClose }) {
   const [remarks, setRemarks] = useState("");
   const [override, setOverride] = useState("");
   const [notice, setNotice] = useState(null);
+  const [waLinks, setWaLinks] = useState(null);
 
   const load = () =>
     Promise.all([api.getCertificate(certId), api.anomalies(certId)]).then(
@@ -25,26 +26,48 @@ function Preview({ certId, onClose }) {
     setNotice("Remarks saved â€” PDF re-rendered.");
   }
 
-  async function send(channel) {
+  async function sendEmail() {
     setNotice(null);
+    setWaLinks(null);
     try {
       const jobs = await api.dispatch(certId, {
-        channel,
+        channel: "email",
         override_reason: override || undefined,
         user: "web-ui",
       });
-      setNotice(
-        `${channel === "email" ? "Email" : "WhatsApp"}: ${jobs
-          .map((j) => `${j.recipient} â†’ ${j.status}`)
-          .join(", ")}`
-      );
+      const failed = jobs.find((j) => j.error);
+      if (failed) {
+        setNotice(
+          failed.error.includes("SMTP is not configured")
+            ? "Email not sent. SMTP is not configured yet; add your SMTP host, user, from address, and app password in Settings."
+            : `Email failed: ${failed.error}`
+        );
+        return;
+      }
+      setNotice(`Email: ${jobs.map((j) => `${j.recipient} -> ${j.status}`).join(", ")}`);
     } catch (err) {
       if (err.detail?.blocked) {
         setAnomalies(err.detail.anomalies);
-        setNotice("Send blocked â€” fix the anomalies below, or enter an override reason and retry.");
+        setNotice("Send blocked. Fix the anomalies below, or enter an override reason and retry.");
       } else {
         setNotice(err.message);
       }
+    }
+  }
+
+  async function sendWhatsApp() {
+    setNotice(null);
+    try {
+      const res = await api.whatsappLinks(certId);
+      if (!res.links.length) {
+        setNotice("No WhatsApp number on record for this supplier.");
+        return;
+      }
+      window.open(res.links[0].url, "_blank", "noopener");
+      setWaLinks(res.links);
+      setNotice("WhatsApp opened with a pre-filled message and signed certificate link.");
+    } catch (err) {
+      setNotice(err.message);
     }
   }
 
@@ -56,8 +79,8 @@ function Preview({ certId, onClose }) {
         {/* action bar â€” all dispatch options live here, inside Certificate Issue */}
         <div className="flex items-center gap-2 px-5 py-3 border-b border-rule sticky top-0 bg-white rounded-t-lg">
           <div className="font-mono text-sm mr-auto">{cert.certificate_no}</div>
-          <button className="btn-ghost" onClick={() => send("email")}>Send email</button>
-          <button className="btn-ghost" onClick={() => send("whatsapp")}>Send WhatsApp</button>
+          <button className="btn-ghost" onClick={sendEmail}>Send email</button>
+          <button className="btn-ghost" onClick={sendWhatsApp}>Send WhatsApp</button>
           <button className="btn-ghost" onClick={() => {
             const w = window.open(api.pdfUrl(cert.id), "_blank");
             w?.addEventListener("load", () => w.print());
@@ -67,6 +90,18 @@ function Preview({ certId, onClose }) {
         </div>
 
         {notice && <p className="px-5 pt-3 text-sm text-ledger">{notice}</p>}
+        {waLinks?.length > 1 && (
+          <div className="mx-5 mt-3 rounded border border-rule bg-paper p-3 text-sm">
+            <p className="font-medium mb-2">Additional WhatsApp contacts</p>
+            <div className="flex flex-wrap gap-2">
+              {waLinks.map((link) => (
+                <a key={link.recipient} className="btn-ghost btn-sm" href={link.url} target="_blank" rel="noreferrer">
+                  {link.recipient}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
 
         {anomalies.length > 0 && (
           <div className="mx-5 mt-3 border border-red-300 bg-red-50 rounded p-3 text-sm">
@@ -165,6 +200,9 @@ function Preview({ certId, onClose }) {
 
           <p className="mt-3"><span className="font-medium">Amount In word:</span> {cert.amount_in_words}</p>
           <p className="text-ink/70">Certified that the information given above is correct and complete.</p>
+          {cert.remarks && (
+            <p className="mt-1"><span className="font-medium">Remarks:</span> {cert.remarks}</p>
+          )}
 
           {/* the ONLY editable field */}
           <div className="mt-4">

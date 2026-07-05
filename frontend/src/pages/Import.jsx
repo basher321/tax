@@ -1,115 +1,113 @@
-import { useEffect, useState } from "react";
+﻿import { useMemo, useState } from "react";
 import { api } from "../api/client.js";
+import { PageHeader, Notice, EmptyState } from "../components/ui.jsx";
 
-function Uploader({ title, hint, onUpload }) {
+export default function Import() {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
+  const [batch, setBatch] = useState(null);
   const [error, setError] = useState(null);
 
-  async function handleFile(e) {
-    const file = e.target.files?.[0];
+  const errorsByRow = useMemo(() => {
+    const map = {};
+    for (const err of batch?.errors || []) {
+      (map[err.row_number] ||= []).push(
+        err.column ? `${err.column}: ${err.message}` : err.message
+      );
+    }
+    return map;
+  }, [batch]);
+
+  async function handleFile(event) {
+    const file = event.target.files?.[0];
     if (!file) return;
-    setBusy(true); setError(null); setResult(null);
+    setBusy(true);
+    setError(null);
+    setBatch(null);
     try {
-      setResult(await onUpload(file));
+      setBatch(await api.uploadDepot(file));
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
-      e.target.value = "";
+      event.target.value = "";
     }
   }
 
   return (
-    <div className="card p-5">
-      <h2 className="font-medium">{title}</h2>
-      <p className="text-sm text-ink/60 mt-1">{hint}</p>
-      <label className="btn-primary inline-block mt-3 cursor-pointer">
-        {busy ? "Uploading…" : "Choose .xlsx file"}
-        <input type="file" accept=".xlsx" className="hidden" onChange={handleFile} disabled={busy} />
-      </label>
-      {error && <p className="text-sm text-red-700 mt-2">{error}</p>}
-      {result && (
-        <p className="text-sm mt-2">
-          {result.total_rows} rows read — {" "}
-          <span className="text-ledger font-medium">{result.ok_rows} imported</span>
-          {result.error_rows > 0 && (
-            <span className="text-red-700"> · {result.error_rows} rows need attention (see table below)</span>
-          )}
-        </p>
-      )}
-    </div>
-  );
-}
+    <div className="space-y-5">
+      <PageHeader
+        title="Import"
+        subtitle="Upload the Depot-SCB workbook. Every parsed row and column appears below."
+      >
+        <label className={`btn-primary cursor-pointer ${busy ? "opacity-60 pointer-events-none" : ""}`}>
+          {busy ? "Parsing..." : "Upload .xlsx file"}
+          <input type="file" accept=".xlsx" className="hidden" onChange={handleFile} disabled={busy} />
+        </label>
+      </PageHeader>
 
-export default function Import() {
-  const [batches, setBatches] = useState([]);
-  const [selected, setSelected] = useState(null);
+      {error && <Notice kind="err" onDismiss={() => setError(null)}>{error}</Notice>}
 
-  const refresh = () => api.importBatches().then((b) => {
-    setBatches(b);
-    if (b.length && !selected) setSelected(b[0]);
-  });
-
-  useEffect(() => { refresh(); }, []);
-
-  return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Import</h1>
-
-      <div className="grid grid-cols-2 gap-4">
-        <Uploader
-          title="Depot-SCB workbook"
-          hint="Imports all 21 columns from the Depot-SCB sheet. Bad rows are skipped and listed below — the import never aborts on a single row."
-          onUpload={async (f) => { const r = await api.uploadDepot(f); refresh(); setSelected(r); return r; }}
-        />
-        <Uploader
-          title="Challan file"
-          hint="Auto-fills Challan No., Challan Date, Total Challan Amount and Section on matching supplier / month records."
-          onUpload={async (f) => { const r = await api.uploadChallan(f); refresh(); setSelected(r); return r; }}
-        />
-      </div>
-
-      <div className="card">
-        <div className="px-5 py-3 border-b border-rule flex items-center gap-3">
-          <h2 className="font-medium">Row-level errors</h2>
-          <select
-            className="input !w-auto"
-            value={selected?.id || ""}
-            onChange={(e) => setSelected(batches.find((b) => b.id === Number(e.target.value)))}
-          >
-            {batches.map((b) => (
-              <option key={b.id} value={b.id}>
-                #{b.id} · {b.filename} ({b.kind}) — {b.error_rows} errors
-              </option>
-            ))}
-          </select>
+      {busy && (
+        <div className="card p-8 text-center text-sm text-ink/50">
+          Reading the workbook. Large files can take a few seconds.
         </div>
-        {!selected || selected.errors?.length === 0 ? (
-          <p className="p-5 text-sm text-ink/50">
-            No errors in this batch. Every row imported cleanly.
-          </p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs uppercase tracking-wide text-ink/50 border-b border-rule">
-                <th className="px-5 py-2">Excel row</th>
-                <th className="px-3 py-2">Column</th>
-                <th className="px-3 py-2">Problem</th>
-              </tr>
-            </thead>
-            <tbody>
-              {selected.errors.map((e, i) => (
-                <tr key={i} className="border-b border-rule/60">
-                  <td className="px-5 py-2 font-mono">{e.row_number}</td>
-                  <td className="px-3 py-2">{e.column || "—"}</td>
-                  <td className="px-3 py-2 text-red-800">{e.message}</td>
+      )}
+
+      {!busy && !batch && !error && (
+        <div className="card">
+          <EmptyState
+            title="No file uploaded yet"
+            hint="Choose an .xlsx file to review the full parsed sheet here."
+          />
+        </div>
+      )}
+
+      {batch && (
+        <div className="card overflow-hidden">
+          <div className="card-head">
+            <span className="card-title">{batch.filename}</span>
+            <span className="badge-green">{batch.ok_rows.toLocaleString()} imported</span>
+            {batch.error_rows > 0 && (
+              <span className="badge-red" title="Tinted rows below show the skipped row reason">
+                {batch.error_rows} skipped
+              </span>
+            )}
+            <span className="ml-auto text-xs text-ink/40">
+              {batch.total_rows.toLocaleString()} rows, {batch.columns?.length || 0} columns
+            </span>
+          </div>
+
+          <div className="overflow-auto max-h-[70vh]">
+            <table className="tbl min-w-max">
+              <thead className="sticky top-0 z-10">
+                <tr>
+                  <th>Row</th>
+                  {batch.columns?.map((column) => <th key={column}>{column}</th>)}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+              </thead>
+              <tbody className="font-mono text-xs">
+                {batch.rows?.map((row) => {
+                  const errors = errorsByRow[row.__excel_row];
+                  return (
+                    <tr
+                      key={row.__excel_row}
+                      className={errors ? "!bg-red-50 hover:!bg-red-100" : ""}
+                      title={errors?.join("\n")}
+                    >
+                      <td className="text-ink/40">{row.__excel_row}</td>
+                      {batch.columns?.map((column) => (
+                        <td key={column} className="max-w-[220px] truncate">
+                          {row[column]}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

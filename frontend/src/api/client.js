@@ -27,11 +27,6 @@ export const api = {
     fd.append("file", file);
     return request("/import/depot", { method: "POST", body: fd });
   },
-  uploadChallan: (file) => {
-    const fd = new FormData();
-    fd.append("file", file);
-    return request("/import/challan", { method: "POST", body: fd });
-  },
   importBatches: () => request("/import/batches"),
 
   pendingGroupings: () => request("/certificates/pending"),
@@ -60,6 +55,9 @@ export const api = {
   processQueue: () => request("/dispatch/process", { method: "POST" }),
   dispatchJobs: () => request("/dispatch/jobs"),
   pdfUrl: (id) => `${BASE}/certificates/${id}/pdf`,
+  whatsappLinks: (id) => request(`/certificates/${id}/whatsapp-links`),
+  logoUrl: `${BASE}/settings/org/logo`,
+  sealUrl: `${BASE}/settings/org/seal`,
 
   getOrg: () => request("/settings/org"),
   updateOrg: (body) =>

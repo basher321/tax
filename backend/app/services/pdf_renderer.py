@@ -30,10 +30,24 @@ from reportlab.platypus import (
     BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer, Table,
     TableStyle, Image as RLImage, KeepTogether,
 )
+from reportlab.lib.utils import ImageReader
 
 from ..config import get_settings
 
 MIN_ROWS = 20  # the fixed format shows 20 serial lines; grows when needed
+
+
+def _fitted_image(path: str, max_w_mm: float, max_h_mm: float) -> "RLImage | None":
+    """Scale an uploaded image into a box without stretching it."""
+    try:
+        iw, ih = ImageReader(path).getSize()
+    except Exception:
+        return None
+    if not iw or not ih:
+        return None
+    scale = min((max_w_mm * mm) / iw, (max_h_mm * mm) / ih)
+    return RLImage(path, width=iw * scale, height=ih * scale)
+
 
 _BASE = "Helvetica"
 _BOLD = "Helvetica-Bold"
@@ -92,8 +106,23 @@ def render_certificate_pdf(db, cert) -> str:
     story = []
 
     # ---------- Header (repeated once at document start, as in the format) ----
-    story.append(Paragraph("Certificate of Deduction of Tax", P_TITLE))
-    story.append(Paragraph("[Section 145 of the Income Tax Act 2023]", P_SUB))
+    title_block = [
+        Paragraph("Certificate of Deduction of Tax", P_TITLE),
+        Paragraph("[Section 145 of the Income Tax Act 2023]", P_SUB),
+    ]
+    logo_img = (_fitted_image(org.logo_path, 24, 12)
+                if org.logo_path and os.path.exists(org.logo_path) else None)
+    if logo_img:
+        header = Table([[logo_img, title_block, ""]],
+                       colWidths=[26 * mm, W - 52 * mm, 26 * mm])
+        header.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(header)
+    else:
+        story.extend(title_block)
     story.append(Spacer(1, 2 * mm))
 
     no_tbl = Table(
@@ -240,13 +269,18 @@ def render_certificate_pdf(db, cert) -> str:
     story.append(Spacer(1, 4 * mm))
 
     # ---------- Amount in words + certification ------------------------------
-    aiw = Table(
-        [[Paragraph("<b>Amount In word:</b>", P_CELL),
-          Paragraph(cert.amount_in_words or "", P_CELL)],
-         ["", Paragraph("Certified that the information given above is correct "
-                        "and complete.", P_CELL)]],
-        colWidths=[35 * mm, W - 35 * mm],
-    )
+    aiw_rows = [
+        [Paragraph("<b>Amount In word:</b>", P_CELL),
+         Paragraph(cert.amount_in_words or "", P_CELL)],
+        ["", Paragraph("Certified that the information given above is correct "
+                       "and complete.", P_CELL)],
+    ]
+    if cert.remarks:
+        aiw_rows.append([
+            Paragraph("<b>Remarks:</b>", P_CELL),
+            Paragraph(cert.remarks, P_CELL),
+        ])
+    aiw = Table(aiw_rows, colWidths=[35 * mm, W - 35 * mm])
     aiw.setStyle(TableStyle([
         ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
     ]))
@@ -256,9 +290,11 @@ def render_certificate_pdf(db, cert) -> str:
     # ---------- Footer: officer block + seal/signature + auto date -----------
     seal_cell = []
     if org.seal_signature_path and os.path.exists(org.seal_signature_path):
-        # PNG with transparency, rendered above the auto-generated date.
-        seal_cell.append(RLImage(org.seal_signature_path, width=40 * mm, height=18 * mm,
-                                 kind="proportional"))
+        img = _fitted_image(org.seal_signature_path, 45, 22)
+        if img is not None:
+            img.hAlign = "CENTER"
+            seal_cell.append(img)
+            seal_cell.append(Spacer(1, 1 * mm))
     seal_cell.append(Paragraph("<b>Signature and seal</b>",
                                ParagraphStyle("ss", parent=P_CELL_B, alignment=1)))
     seal_cell.append(Paragraph(_fmt_issue(cert.issue_date),
