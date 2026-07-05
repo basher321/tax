@@ -1,0 +1,16 @@
+.git
+.agents
+.codex
+backend/vend
+backend/.env
+backend/.venv
+backend/__pycache__
+backend/**/__pycache__
+backend/.pytest_cache
+backend/pytest-tmp
+backend/storage
+backend/tax_certificates.db
+frontend/node_modules
+frontend/dist
+documents.docx
+~$cuments.docx
