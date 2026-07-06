@@ -8,7 +8,7 @@ The layout is LOCKED — it reproduces certificate_format.jpeg exactly:
     E-TIN + period line
   * Section 06 table: Sl | Date of Payment | Description of payment |
     Section | Amount of payment | Amount of tax deducted | Remarks
-    (minimum 20 body rows, grows if necessary) + Total row
+    (one row per actual payment line, no blank filler rows) + Total row
   * Section 07 table: Sl | Challan Number | Challan date | Bank Name |
     Total amount in the challan | Amount relating to this certificate |
     Remarks + Total row (total of "amount relating" only)
@@ -33,8 +33,6 @@ from reportlab.platypus import (
 from reportlab.lib.utils import ImageReader
 
 from ..config import get_settings
-
-MIN_ROWS = 20  # the fixed format shows 20 serial lines; grows when needed
 
 
 def _fitted_image(path: str, max_w_mm: float, max_h_mm: float) -> "RLImage | None":
@@ -141,7 +139,7 @@ def render_certificate_pdf(db, cert) -> str:
     story.append(Spacer(1, 2 * mm))
 
     supplier = cert.supplier
-    has_tin = bool(cert.tin and len(cert.tin) == 12)
+    has_tin = cert.has_12_digit_tin
     yes_mark = "\u2713" if has_tin else ""
     no_mark = "" if has_tin else "\u2713"
 
@@ -185,7 +183,7 @@ def render_certificate_pdf(db, cert) -> str:
                  "Amount of\npayment", "Amount of tax\ndeducted", "Remarks"]
     s6_rows = [s6_header]
     lines = list(cert.lines)
-    n_rows = max(MIN_ROWS, len(lines))
+    n_rows = max(1, len(lines))
     for i in range(n_rows):
         if i < len(lines):
             ln = lines[i]
@@ -193,10 +191,13 @@ def render_certificate_pdf(db, cert) -> str:
                 str(ln.sl), _fmt_date(ln.date_of_payment),
                 Paragraph(ln.description or "", P_CELL), ln.section or "",
                 _fmt_amt(ln.amount_of_payment), _fmt_amt(ln.amount_of_tax_deducted),
-                Paragraph(cert.remarks or ln.remarks or "", P_CELL),
+                Paragraph(cert.remarks or "", P_CELL) if i == 0 else "",
             ])
         else:
-            s6_rows.append([str(i + 1), "", "", "", "", "", ""])
+            s6_rows.append([
+                str(i + 1), "", "", "", "", "",
+                Paragraph(cert.remarks or "", P_CELL) if i == 0 else "",
+            ])
     s6_rows.append(["", "Total", "", "",
                     _fmt_amt(cert.total_payment), _fmt_amt(cert.total_tax_deducted), ""])
 
@@ -215,6 +216,8 @@ def render_certificate_pdf(db, cert) -> str:
         ("ALIGN", (4, 1), (5, -1), "RIGHT"),
         ("ALIGN", (1, -1), (1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("SPAN", (6, 1), (6, n_rows)),
+        ("VALIGN", (6, 1), (6, n_rows), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.93, 0.93, 0.93)),
         ("TOPPADDING", (0, 0), (-1, -1), 1.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
@@ -233,7 +236,7 @@ def render_certificate_pdf(db, cert) -> str:
                  "Remarks"]
     s7_rows = [s7_header]
     chlines = list(cert.challan_lines)
-    n7 = max(MIN_ROWS, len(chlines))
+    n7 = max(1, len(chlines))
     for i in range(n7):
         if i < len(chlines):
             cl = chlines[i]
@@ -241,10 +244,13 @@ def render_certificate_pdf(db, cert) -> str:
                 str(cl.sl), cl.challan_number or "", _fmt_date(cl.challan_date),
                 Paragraph(cl.bank_name or "", P_CELL),
                 _fmt_amt(cl.total_challan_amount), _fmt_amt(cl.amount_related),
-                Paragraph(cl.remarks or "", P_CELL),
+                Paragraph(cert.remarks or "", P_CELL) if i == 0 else "",
             ])
         else:
-            s7_rows.append([str(i + 1), "", "", "", "", "", ""])
+            s7_rows.append([
+                str(i + 1), "", "", "", "", "",
+                Paragraph(cert.remarks or "", P_CELL) if i == 0 else "",
+            ])
     s7_rows.append(["", "Total", "", "", "", _fmt_amt(cert.total_tax_deducted), ""])
 
     s7_widths = [9 * mm, 36 * mm, 22 * mm, 30 * mm, 28 * mm, 30 * mm,
@@ -261,6 +267,8 @@ def render_certificate_pdf(db, cert) -> str:
         ("ALIGN", (4, 1), (5, -1), "RIGHT"),
         ("ALIGN", (1, -1), (1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("SPAN", (6, 1), (6, n7)),
+        ("VALIGN", (6, 1), (6, n7), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.93, 0.93, 0.93)),
         ("TOPPADDING", (0, 0), (-1, -1), 1.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),

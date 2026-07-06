@@ -43,22 +43,56 @@ function Preview({ certId, onClose }) {
   const [remarks, setRemarks] = useState("");
   const [override, setOverride] = useState("");
   const [notice, setNotice] = useState(null);
+  const [noticeKind, setNoticeKind] = useState("ok");
+  const [emailBusy, setEmailBusy] = useState(false);
+
+  const showNotice = (message, kind = "ok") => {
+    setNotice(message);
+    setNoticeKind(kind);
+  };
+
+  const [waLinks, setWaLinks] = useState(null);
+  const [emailJobs, setEmailJobs] = useState([]);
+
+  const refreshEmailStatus = () =>
+    api.dispatchJobsFor(certId).then(
+      (jobs) => setEmailJobs(jobs.filter((j) => j.channel === "email")),
+      () => {},
+    );
 
   const load = () =>
-    Promise.all([api.getCertificate(certId), api.anomalies(certId)]).then(
-      ([c, a]) => { setCert(c); setRemarks(c.remarks || ""); setAnomalies(a); }
+    Promise.all([
+      api.getCertificate(certId),
+      api.anomalies(certId),
+      api.whatsappLinks(certId).catch(() => null),
+      refreshEmailStatus(),
+    ]).then(
+      ([c, a, wa]) => { setCert(c); setRemarks(c.remarks || ""); setAnomalies(a); setWaLinks(wa); }
     );
   useEffect(() => { load(); }, [certId]);
 
   async function saveRemarks() {
     const c = await api.updateRemarks(certId, remarks);
     setCert(c);
-    setNotice("Remarks saved - PDF re-rendered.");
+    showNotice("Remarks saved - PDF re-rendered.");
+  }
+
+  async function setTinStatus(has12DigitTin) {
+    const c = await api.updateTinStatus(certId, has12DigitTin);
+    setCert(c);
+    showNotice("TIN status saved - PDF re-rendered.");
   }
 
   async function sendEmail() {
-    setNotice(null);
+    showNotice("Sending email with certificate PDF attached...");
+    setEmailBusy(true);
     try {
+      const org = await api.getOrg();
+      if (!org.smtp_host || !(org.smtp_from || org.smtp_user || org.officer_email)) {
+        openManualEmail();
+        showNotice("SMTP is not configured. Gmail compose and the PDF opened in separate windows; attach the PDF manually, or configure SMTP in Settings for automatic attachment.", "warn");
+        return;
+      }
       const jobs = await api.dispatch(certId, {
         channel: "email",
         override_reason: override || undefined,
@@ -66,67 +100,63 @@ function Preview({ certId, onClose }) {
       });
       const failed = jobs.find((j) => j.error);
       if (failed) {
-        setNotice(
-          failed.error.includes("SMTP is not configured")
-            ? "Email not sent. SMTP is not configured yet; add your SMTP host, user, from address, and app password in Settings."
-            : `Email failed: ${failed.error}`
-        );
-        return;
-      }
-      setNotice(`Email: ${jobs.map((j) => `${j.recipient} -> ${j.status}`).join(", ")}`);
-    } catch (err) {
-      if (err.detail?.blocked) {
-        setAnomalies(await blockedAnomalies(certId, err.detail));
-        setNotice("Send blocked. Fix the anomalies below, or enter an override reason and retry.");
-      } else {
-        setNotice(err.message);
-      }
-    }
-  }
-
-  async function sendWhatsApp() {
-    setNotice(null);
-    try {
-      const jobs = await api.dispatch(certId, {
-        channel: "whatsapp",
-        override_reason: override || undefined,
-        user: "web-ui",
-      });
-      const failed = jobs.find((j) => j.error);
-      if (failed) {
-        if (
-          failed.error.includes("credentials not configured") ||
-          failed.error.includes("PUBLIC_BASE_URL") ||
-          failed.error.includes("public HTTPS")
-        ) {
-          if (await openManualWhatsApp()) {
-            setNotice("WhatsApp API is not ready for automatic document sending. The PDF and WhatsApp chat were opened so you can attach the certificate manually.");
-          }
-          return;
+        if (failed.error.includes("SMTP is not configured")) {
+          openManualEmail();
+          showNotice("SMTP is not configured. Gmail compose and the PDF opened in separate windows; attach the PDF manually, or configure SMTP in Settings for automatic attachment.", "warn");
+        } else {
+          showNotice(`Email failed: ${failed.error}`, "err");
         }
-        setNotice(`WhatsApp failed: ${failed.error}`);
         return;
       }
-      setNotice(`WhatsApp: ${jobs.map((j) => `${j.recipient} -> ${j.status}`).join(", ")}`);
+      if (jobs.some((j) => j.status === "queued")) {
+        showNotice(`Email queued, not sent yet: ${jobs.map((j) => j.recipient).join(", ")}. Settings is in offline dispatch mode, so run Process Queue or switch Dispatch mode to Online to send immediately.`, "warn");
+      } else {
+        showNotice(`Email sent successfully with certificate PDF attached to: ${jobs.map((j) => j.recipient).join(", ")}`);
+      }
     } catch (err) {
       if (err.detail?.blocked) {
         setAnomalies(await blockedAnomalies(certId, err.detail));
-        setNotice("Send blocked. Fix the anomalies below, or enter an override reason and retry.");
+        showNotice("Send blocked. Fix the anomalies below, or enter an override reason and retry.", "err");
       } else {
-        setNotice(err.message);
+        showNotice(`Email failed: ${err.message}`, "err");
       }
+    } finally {
+      setEmailBusy(false);
+      refreshEmailStatus();
     }
   }
 
-  async function openManualWhatsApp() {
-    const res = await api.whatsappLinks(certId);
-    if (!res.links.length) {
-      setNotice("No WhatsApp number on record for this supplier.");
-      return false;
+  function sendWhatsApp() {
+    setNotice(null);
+    if (waLinks === null) {
+      showNotice("The WhatsApp link is still loading. Please try again in a moment.", "warn");
+      return;
     }
+    if (!waLinks.links.length) {
+      showNotice("No WhatsApp number on record for this supplier.");
+      return;
+    }
+    window.open(waLinks.links[0].url, "_blank", "noopener");
     window.open(api.pdfUrl(cert.id), "_blank", "noopener");
-    window.open(res.links[0].url, "_blank", "noopener");
-    return true;
+    showNotice("The PDF and WhatsApp chat were opened. Attach the certificate PDF in WhatsApp to send it with no API cost.", "warn");
+  }
+
+  function openManualEmail() {
+    const recipients = (cert.supplier.contacts || [])
+      .filter((c) => c.kind === "email")
+      .map((c) => c.value)
+      .join(",");
+    const subject = `Tax Deduction Certificate ${cert.certificate_no}`;
+    const body = [
+      `Dear ${cert.supplier.name},`,
+      "",
+      `Please find attached the Certificate of Deduction of Tax (${cert.certificate_no}) for the period ${cert.period}.`,
+      "",
+      "Regards,",
+    ].join("\n");
+    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(recipients)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.open(gmailUrl, "_blank", "noopener");
+    window.open(api.pdfUrl(cert.id), "_blank", "noopener");
   }
 
   if (!cert) return null;
@@ -137,7 +167,9 @@ function Preview({ certId, onClose }) {
         {/* action bar - all dispatch options live here, inside Certificate Issue */}
         <div className="flex items-center gap-2 px-5 py-3 border-b border-rule sticky top-0 bg-white rounded-t-lg">
           <div className="font-mono text-sm mr-auto">{cert.certificate_no}</div>
-          <button className="btn-ghost" onClick={sendEmail}>Send email</button>
+          <button className="btn-ghost" onClick={sendEmail} disabled={emailBusy}>
+            {emailBusy ? "Sending..." : "Send email"}
+          </button>
           <button className="btn-ghost" onClick={sendWhatsApp}>Send WhatsApp</button>
           <button className="btn-ghost" onClick={() => {
             const w = window.open(api.pdfUrl(cert.id), "_blank");
@@ -147,7 +179,17 @@ function Preview({ certId, onClose }) {
           <button className="btn-primary" onClick={onClose}>Close</button>
         </div>
 
-        {notice && <p className="px-5 pt-3 text-sm text-ledger">{notice}</p>}
+        {notice && (
+          <p className={`mx-5 mt-3 rounded border px-3 py-2 text-sm ${
+            noticeKind === "err"
+              ? "border-red-200 bg-red-50 text-red-800"
+              : noticeKind === "warn"
+                ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-ledger/20 bg-ledger/[0.07] text-ledger"
+          }`}>
+            {notice}
+          </p>
+        )}
         {anomalies.length > 0 && (
           <div className="mx-5 mt-3 border border-red-300 bg-red-50 rounded p-3 text-sm">
             <p className="font-medium text-red-800 mb-1">
@@ -167,6 +209,28 @@ function Preview({ certId, onClose }) {
           </div>
         )}
 
+        {emailJobs.length > 0 && (
+          <div className="mx-5 mt-3 border border-rule rounded p-3 text-sm">
+            <div className="flex items-center mb-1">
+              <p className="font-medium mr-auto">Email delivery status</p>
+              <button className="btn-ghost !py-0.5 text-xs" onClick={refreshEmailStatus}>Refresh</button>
+            </div>
+            <ul className="space-y-0.5">
+              {emailJobs.map((j) => (
+                <li key={j.id} className="flex items-center gap-2">
+                  <span>{j.recipient}</span>
+                  <span className="text-ink/50">- {j.status}</span>
+                  {j.status === "sent" && (
+                    j.opened_at
+                      ? <span className="text-ledger text-xs">Opened {new Date(j.opened_at).toLocaleString()}</span>
+                      : <span className="text-ink/40 text-xs">Not opened yet</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Fixed certificate layout - mirrors certificate_format.jpeg.
             Everything is read-only; ONLY Remarks below is editable. */}
         <div className="p-6 text-sm">
@@ -183,7 +247,23 @@ function Preview({ certId, onClose }) {
               <tr><td className="w-6">1</td><td className="font-medium w-64">Name of Payee:</td><td colSpan={2}>{cert.supplier.name}</td></tr>
               <tr><td>2</td><td className="font-medium">Address of Payee:</td><td colSpan={2}>{cert.supplier.address || ""}</td></tr>
               <tr><td>3</td><td>Does the person have a Twelve-digit TIN?</td>
-                <td>Yes {cert.tin?.length === 12 ? "[x]" : "[ ]"}</td><td>No {cert.tin?.length === 12 ? "[ ]" : "[x]"}</td></tr>
+                <td>
+                  <label className="cursor-pointer">
+                    <input type="radio" name="has12DigitTin" className="mr-1"
+                      checked={cert.has_12_digit_tin === true}
+                      onChange={() => setTinStatus(true)} />
+                    Yes
+                  </label>
+                </td>
+                <td>
+                  <label className="cursor-pointer">
+                    <input type="radio" name="has12DigitTin" className="mr-1"
+                      checked={cert.has_12_digit_tin === false}
+                      onChange={() => setTinStatus(false)} />
+                    No
+                  </label>
+                </td>
+              </tr>
               <tr><td>4</td><td>Twelve-digit TIN (if answer of 03 is Yes)</td><td className="font-mono" colSpan={2}>E-TIN&nbsp;&nbsp;{cert.tin}</td></tr>
               <tr><td>5</td><td>Period for which payment is made From (date) to (date)</td>
                 <td colSpan={2}>From {cert.period_from} to {cert.period_to}</td></tr>
@@ -197,7 +277,7 @@ function Preview({ certId, onClose }) {
                 <th>Amount of payment</th><th>Amount of tax deducted</th><th>Remarks</th></tr>
             </thead>
             <tbody>
-              {cert.lines.map((l) => (
+              {cert.lines.map((l, idx) => (
                 <tr key={l.sl}>
                   <td className="text-center">{l.sl}</td>
                   <td className="text-center">{l.date_of_payment}</td>
@@ -205,7 +285,11 @@ function Preview({ certId, onClose }) {
                   <td className="text-center">{l.section}</td>
                   <td className="text-right font-mono">{fmt(l.amount_of_payment)}</td>
                   <td className="text-right font-mono">{fmt(l.amount_of_tax_deducted)}</td>
-                  <td>{cert.remarks || l.remarks}</td>
+                  {idx === 0 && (
+                    <td rowSpan={cert.lines.length} className="align-top">
+                      {cert.remarks}
+                    </td>
+                  )}
                 </tr>
               ))}
               <tr className="font-semibold">
@@ -224,7 +308,7 @@ function Preview({ certId, onClose }) {
                 <th>Total amount in the challan</th><th>Amount relating to this certificate</th><th>Remarks</th></tr>
             </thead>
             <tbody>
-              {cert.challan_lines.map((l) => (
+              {cert.challan_lines.map((l, idx) => (
                 <tr key={l.sl}>
                   <td className="text-center">{l.sl}</td>
                   <td className="font-mono">{l.challan_number}</td>
@@ -232,7 +316,11 @@ function Preview({ certId, onClose }) {
                   <td>{l.bank_name}</td>
                   <td className="text-right font-mono">{fmt(l.total_challan_amount)}</td>
                   <td className="text-right font-mono">{fmt(l.amount_related)}</td>
-                  <td>{l.remarks}</td>
+                  {idx === 0 && (
+                    <td rowSpan={cert.challan_lines.length} className="align-top">
+                      {cert.remarks}
+                    </td>
+                  )}
                 </tr>
               ))}
               <tr className="font-semibold">

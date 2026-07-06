@@ -69,7 +69,7 @@ def _frontend_dist() -> Path | None:
     return None
 
 
-frontend_dist = _frontend_dist()
+frontend_dist = _frontend_dist() if os.environ.get("SERVE_FRONTEND") == "1" else None
 if frontend_dist:
     assets = frontend_dist / "assets"
     if assets.exists():

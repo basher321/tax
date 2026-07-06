@@ -22,6 +22,8 @@ export default function Settings() {
   const [org, setOrg] = useState(null);
   const [num, setNum] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [resetConfirm, setResetConfirm] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
 
   useEffect(() => {
     api.getOrg().then(setOrg);
@@ -63,12 +65,30 @@ export default function Settings() {
     setNotice("Numbering configuration saved.");
   }
 
-  const upload = (fn, label) => async (e) => {
+  async function resetDatabase() {
+    if (resetConfirm !== "RESET") return;
+    if (!window.confirm("Reset the database and remove all module data?")) return;
+    setResetBusy(true);
+    try {
+      await api.resetDatabase(resetConfirm);
+      const [freshOrg, freshNum] = await Promise.all([api.getOrg(), api.getNumbering()]);
+      setOrg(freshOrg);
+      setNum(freshNum);
+      setResetConfirm("");
+      setNotice("Database reset complete. You can start again.");
+    } catch (err) {
+      setNotice(`Database reset failed: ${err.message}`);
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
+  const upload = (fn, label, pathField) => async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    await fn(f);
+    const res = await fn(f);
+    setOrg((current) => ({ ...current, [pathField]: res.path }));
     setNotice(`${label} uploaded.`);
-    api.getOrg().then(setOrg);
   };
 
   const example = `${num.company_token}${num.separator}2025-26${num.separator}${String(num.start_number).padStart(Number(num.pad_width), "0")}`;
@@ -86,7 +106,7 @@ export default function Settings() {
           <Field label="Company logo">
             <label className="btn-ghost cursor-pointer inline-block">
               {org.logo_path ? "Replace logo" : "Upload logo"}
-              <input type="file" accept="image/*" className="hidden" onChange={upload(api.uploadLogo, "Logo")} />
+              <input type="file" accept="image/*" className="hidden" onChange={upload(api.uploadLogo, "Logo", "logo_path")} />
             </label>
           </Field>
         </div>
@@ -103,7 +123,7 @@ export default function Settings() {
         <Field label="Seal + signature image (PNG with transparency)">
           <label className="btn-ghost cursor-pointer inline-block">
             {org.seal_signature_path ? "Replace image" : "Upload image"}
-            <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={upload(api.uploadSeal, "Seal/signature")} />
+            <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={upload(api.uploadSeal, "Seal/signature", "seal_signature_path")} />
           </label>
           {org.seal_signature_path && <span className="text-xs text-ledger ml-2">✓ on file</span>}
         </Field>
@@ -203,6 +223,30 @@ export default function Settings() {
       </section>
 
       <button className="btn-primary" onClick={saveOrg}>Save all settings</button>
+
+      <section className="card border-red-200 bg-red-50/40 p-5 space-y-3">
+        <h2 className="font-medium text-red-800">Database reset</h2>
+        <p className="text-sm text-red-800">
+          This removes imports, suppliers, certificates, dispatch jobs, rates,
+          settings, and numbering data.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Type RESET to confirm">
+            <input
+              className="input max-w-48 border-red-200 focus:border-red-700 focus:ring-red-700/10"
+              value={resetConfirm}
+              onChange={(e) => setResetConfirm(e.target.value)}
+            />
+          </Field>
+          <button
+            className="btn border-red-700 bg-red-700 text-white shadow-sm hover:bg-red-800"
+            onClick={resetDatabase}
+            disabled={resetBusy || resetConfirm !== "RESET"}
+          >
+            {resetBusy ? "Resetting..." : "Reset database"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

@@ -112,17 +112,33 @@ def _clean(value):
     return s or None
 
 
-def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> pd.DataFrame:
+def _find_header_row(path: str, sheet_name: str) -> int | None:
     """Read the sheet locating the header row that contains 'Category'."""
     raw = pd.read_excel(path, sheet_name=sheet_name, header=None, dtype=object)
-    header_idx = None
     for i in range(min(10, len(raw))):
         if "Category" in [str(v).strip() for v in raw.iloc[i].tolist()]:
-            header_idx = i
+            return i
+    return None
+
+
+def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> pd.DataFrame:
+    """Read the Depot sheet, locating the header row that contains 'Category'."""
+    with pd.ExcelFile(path) as xl:
+        sheet_names = xl.sheet_names
+    candidates = [sheet_name] if sheet_name in sheet_names else []
+    candidates.extend([name for name in sheet_names if name not in candidates])
+
+    selected_sheet = None
+    header_idx = None
+    for candidate in candidates:
+        header_idx = _find_header_row(path, candidate)
+        if header_idx is not None:
+            selected_sheet = candidate
             break
+
     if header_idx is None:
         raise ValueError("Could not find header row containing 'Category'")
-    df = pd.read_excel(path, sheet_name=sheet_name, header=header_idx, dtype=object)
+    df = pd.read_excel(path, sheet_name=selected_sheet, header=header_idx, dtype=object)
     df.columns = [str(c).strip() for c in df.columns]
     df["__excel_row"] = df.index + header_idx + 2  # 1-based Excel row numbers
     return df
@@ -142,13 +158,10 @@ def _get_or_create_supplier(db: Session, tin: str, name: str, address, email, wa
             sup.address = address
     for kind, value in ((ContactKind.EMAIL, email), (ContactKind.WHATSAPP, wa)):
         if value:
-            exists = (
-                db.query(SupplierContact)
-                .filter_by(supplier_id=sup.id, kind=kind, value=value)
-                .first()
-            )
+            exists = any(c.kind == kind and c.value == value for c in sup.contacts)
             if not exists:
-                db.add(SupplierContact(supplier_id=sup.id, kind=kind, value=value))
+                sup.contacts.append(SupplierContact(kind=kind, value=value))
+                db.flush()
     return sup
 
 

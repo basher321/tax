@@ -77,7 +77,7 @@ def _attempt(db: Session, job: DispatchJob, org) -> None:
     try:
         cert = db.get(Certificate, job.certificate_id)
         if job.channel == DispatchChannel.EMAIL:
-            send_certificate_email(org, cert, job.recipient)
+            send_certificate_email(org, cert, job.recipient, job.id)
         else:
             send_certificate_whatsapp(org, cert, job.recipient)
         job.status = DispatchStatus.SENT

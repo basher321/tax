@@ -80,6 +80,7 @@ def generate_certificate(db: Session, tin: str, period: str) -> Certificate:
         total_tax_deducted=data.total_tax_deducted,
         total_vds=data.total_vds,
         amount_in_words=amount_in_words(data.total_tax_deducted),
+        has_12_digit_tin=bool(tin and len(tin) == 12),
         status=CertStatus.GENERATED,
         issue_date=date.today(),
     )

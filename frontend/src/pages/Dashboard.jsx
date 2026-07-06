@@ -7,10 +7,15 @@ const number = (n) => Number(n || 0).toLocaleString();
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [updatedAt, setUpdatedAt] = useState(null);
 
-  useEffect(() => {
-    api.dashboard().then(setData).catch((e) => setError(e.message));
-  }, []);
+  const refresh = () => {
+    setError(null);
+    api.dashboard().then((d) => { setData(d); setUpdatedAt(new Date()); })
+      .catch((e) => setError(e.message));
+  };
+
+  useEffect(() => { refresh(); }, []);
 
   if (error) return <p className="text-red-700">Couldn't load summary: {error}</p>;
   if (!data) return <p className="text-ink/50">Loading...</p>;
@@ -34,6 +39,17 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-end gap-2 text-xs text-ink/50">
+        {updatedAt && <span>Updated {updatedAt.toLocaleTimeString()}</span>}
+        <button className="btn-ghost !py-0.5" onClick={refresh}>Refresh</button>
+      </div>
+
+      {data.transactions === 0 && (
+        <p className="text-sm text-ink/60">
+          No data yet — upload your Depot-SCB workbook in Import to get started.
+        </p>
+      )}
+
       <section className="grid grid-cols-4 gap-4">
         <div className="card col-span-2 p-5">
           <div className="flex items-start justify-between gap-4">

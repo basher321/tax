@@ -6,17 +6,38 @@ Common host presets (surfaced in the Settings UI as a dropdown):
   Google        : smtp.gmail.com     : 587 (STARTTLS)
   Zimbra        : your-zimbra-host   : 587/465
 """
+import hashlib
+import hmac
 import os
 import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
 
+from ...config import get_settings
 from ...models.entities import Certificate, OrgSettings
+
+
+def sign_job_id(job_id: int) -> str:
+    settings = get_settings()
+    return hmac.new(
+        settings.link_signing_secret.encode(),
+        f"job:{job_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:24]
+
+
+def verify_job_sig(job_id: int, sig: str) -> bool:
+    return hmac.compare_digest(sign_job_id(job_id), sig)
+
+
+def tracking_pixel_url(job_id: int) -> str:
+    settings = get_settings()
+    return f"{settings.public_base_url}/public/track/{job_id}.png?sig={sign_job_id(job_id)}"
 
 
 def _smtp_config(org: OrgSettings) -> tuple[str, int, str]:
     host = (org.smtp_host or "").strip()
-    sender = (org.smtp_from or "").strip()
+    sender = (org.smtp_from or org.smtp_user or org.officer_email or "").strip()
     if not (host and sender):
         raise RuntimeError("SMTP is not configured in Settings")
     return host, int(org.smtp_port or 587), sender
@@ -39,6 +60,11 @@ def _send_message(org: OrgSettings, msg: EmailMessage) -> None:
             server.quit()
     except smtplib.SMTPAuthenticationError as exc:
         detail = exc.smtp_error.decode(errors="replace") if isinstance(exc.smtp_error, bytes) else exc.smtp_error
+        if "Application-specific password required" in str(detail):
+            raise RuntimeError(
+                "Gmail requires an App Password for SMTP. Create a Google App Password "
+                "and enter it in Settings instead of your normal Gmail password."
+            ) from exc
         raise RuntimeError(f"SMTP authentication failed: {detail}") from exc
     except smtplib.SMTPConnectError as exc:
         raise RuntimeError(f"Could not connect to SMTP server: {exc}") from exc
@@ -52,21 +78,33 @@ def _send_message(org: OrgSettings, msg: EmailMessage) -> None:
         raise RuntimeError(f"SMTP connection failed: {exc}") from exc
 
 
-def send_certificate_email(org: OrgSettings, cert: Certificate, recipient: str) -> None:
+def send_certificate_email(org: OrgSettings, cert: Certificate, recipient: str, job_id: int) -> None:
     _, _, sender = _smtp_config(org)
     if not cert.pdf_path or not os.path.exists(cert.pdf_path):
         raise RuntimeError("Certificate PDF has not been rendered")
 
-    msg = EmailMessage()
-    msg["Subject"] = f"Tax Deduction Certificate {cert.certificate_no}"
-    msg["From"] = formataddr((org.company_name or "", sender))
-    msg["To"] = recipient
-    msg.set_content(
+    text_body = (
         f"Dear {cert.supplier.name},\n\n"
         f"Please find attached the Certificate of Deduction of Tax "
         f"({cert.certificate_no}) for the period {cert.period}.\n\n"
         f"Regards,\n{org.officer_name or ''}\n{org.officer_designation or ''}"
     )
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Tax Deduction Certificate {cert.certificate_no}"
+    msg["From"] = formataddr((org.company_name or "", sender))
+    msg["To"] = recipient
+    msg.set_content(text_body)
+
+    # The org logo/signature is embedded via a per-dispatch tracking URL: when
+    # the recipient's mail client loads it, /public/track marks this job read.
+    html_paragraphs = "".join(f"<p>{line}</p>" for line in text_body.split("\n\n"))
+    html_body = (
+        html_paragraphs
+        + f'<img src="{tracking_pixel_url(job_id)}" alt="" width="120">'
+    )
+    msg.add_alternative(html_body, subtype="html")
+
     with open(cert.pdf_path, "rb") as f:
         msg.add_attachment(
             f.read(), maintype="application", subtype="pdf",

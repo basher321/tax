@@ -47,12 +47,17 @@ export const api = {
     request(`/certificates/${id}/remarks`, {
       method: "PATCH", body: JSON.stringify({ remarks }),
     }),
+  updateTinStatus: (id, has12DigitTin) =>
+    request(`/certificates/${id}/tin-status`, {
+      method: "PATCH", body: JSON.stringify({ has_12_digit_tin: has12DigitTin }),
+    }),
   anomalies: (id) => request(`/certificates/${id}/anomalies`),
   dispatch: (id, payload) =>
     request(`/certificates/${id}/dispatch`, {
       method: "POST", body: JSON.stringify(payload),
     }),
   processQueue: () => request("/dispatch/process", { method: "POST" }),
+  dispatchJobsFor: (certId) => request(`/dispatch/jobs?certificate_id=${certId}`),
   dispatchJobs: () => request("/dispatch/jobs"),
   pdfUrl: (id) => `${BASE}/certificates/${id}/pdf`,
   whatsappLinks: (id) => request(`/certificates/${id}/whatsapp-links`),
@@ -74,4 +79,8 @@ export const api = {
   getNumbering: () => request("/settings/numbering"),
   updateNumbering: (body) =>
     request("/settings/numbering", { method: "PUT", body: JSON.stringify(body) }),
+  resetDatabase: (confirm) =>
+    request("/settings/database/reset", {
+      method: "POST", body: JSON.stringify({ confirm }),
+    }),
 };

@@ -87,6 +87,7 @@ class CertificateOut(ORM):
     total_tax_deducted: float
     amount_in_words: str | None
     remarks: str | None
+    has_12_digit_tin: bool
     status: str
     issue_date: date
     supplier: SupplierOut
@@ -99,6 +100,14 @@ class CertificateDetailOut(CertificateOut):
 
 class RemarksUpdate(BaseModel):
     remarks: str | None = None
+
+
+class TinStatusUpdate(BaseModel):
+    has_12_digit_tin: bool
+
+
+class DatabaseResetRequest(BaseModel):
+    confirm: str
 
 
 class GenerateRequest(BaseModel):

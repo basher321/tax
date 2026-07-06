@@ -10,7 +10,8 @@ Design notes
   manually editable field (absent from the sheet).
 * ``SupplierContact`` allows multiple emails / WhatsApp numbers per supplier.
 * Certificates snapshot their lines at generation time so later imports don't
-  silently rewrite an issued document. Only ``remarks`` is mutable.
+  silently rewrite an issued document. ``remarks`` and ``has_12_digit_tin``
+  are the only mutable fields.
 """
 import enum
 from datetime import datetime, date
@@ -174,7 +175,10 @@ class Certificate(Base):
     total_tax_deducted: Mapped[float] = mapped_column(Float, default=0)
     total_vds: Mapped[float] = mapped_column(Float, default=0)
     amount_in_words: Mapped[str | None] = mapped_column(Text)
-    remarks: Mapped[str | None] = mapped_column(Text)  # the ONLY editable field
+    remarks: Mapped[str | None] = mapped_column(Text)  # editable field
+    # Row 3 "12-digit TIN?" Yes/No — defaults from tin length at generation
+    # time, but the officer can override it (e.g. TIN typos, format edge cases).
+    has_12_digit_tin: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[CertStatus] = mapped_column(Enum(CertStatus), default=CertStatus.GENERATED)
     issue_date: Mapped[date] = mapped_column(Date, default=date.today)
     pdf_path: Mapped[str | None] = mapped_column(String(512))
@@ -320,6 +324,8 @@ class DispatchJob(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Set when the email's tracking image is fetched by the recipient's client.
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     certificate: Mapped[Certificate] = relationship()
 

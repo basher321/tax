@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:restart": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$pids = netstat -ano | Select-String ':5173' | ForEach-Object { ($_ -split '\\\\s+')[-1] } | Sort-Object -Unique; foreach ($procId in $pids) { if ($procId -and $procId -ne '0') { Stop-Process -Id ([int]$procId) -Force -ErrorAction SilentlyContinue } }; npm run dev\"",
     "build": "vite build",
     "preview": "vite preview"
   },
