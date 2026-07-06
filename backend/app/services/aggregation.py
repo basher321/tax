@@ -147,6 +147,8 @@ def list_groupings(db: Session) -> list[dict]:
             func.count(Transaction.id),
             func.sum(Transaction.sum_of_bill_amount),
             func.sum(Transaction.sum_of_tds),
+            func.min(Transaction.cheque_date),
+            func.max(Transaction.cheque_date),
         )
         .outerjoin(Supplier, Transaction.supplier_id == Supplier.id)
         .filter(Transaction.tin.isnot(None), Transaction.fiscal_year.isnot(None))
@@ -160,6 +162,8 @@ def list_groupings(db: Session) -> list[dict]:
             "row_count": r[4],
             "total_payment": round(r[5] or 0, 2),
             "total_tax_deducted": round(r[6] or 0, 2),
+            "payment_from": r[7],
+            "payment_to": r[8],
         }
         for r in rows
     ]

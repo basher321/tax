@@ -62,6 +62,7 @@ export const api = {
   getOrg: () => request("/settings/org"),
   updateOrg: (body) =>
     request("/settings/org", { method: "PUT", body: JSON.stringify(body) }),
+  testEmail: () => request("/settings/org/test-email", { method: "POST" }),
   uploadLogo: (file) => {
     const fd = new FormData(); fd.append("file", file);
     return request("/settings/org/logo", { method: "POST", body: fd });

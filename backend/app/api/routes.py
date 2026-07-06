@@ -49,6 +49,7 @@ from ..services.certificate_generator import (
     regenerate_pdf,
 )
 from ..services.dispatch import DispatchBlocked, enqueue_dispatch, process_queue
+from ..services.dispatch.email_sender import send_test_email
 from ..services.dispatch.whatsapp_sender import verify_certificate_sig
 from ..services.excel_import import import_depot_workbook, load_depot_sheet
 from ..services.numbering import get_numbering_config
@@ -237,9 +238,8 @@ def dispatch(cert_id: int, req: DispatchRequest, db: Session = Depends(get_db)):
 
 @router.get("/certificates/{cert_id}/whatsapp-links")
 def whatsapp_links(cert_id: int, db: Session = Depends(get_db)):
-    """Build free WhatsApp Click-to-Chat links with a signed PDF URL."""
+    """Build free WhatsApp Click-to-Chat links for manual PDF attachment."""
     from urllib.parse import quote
-    from ..services.dispatch.whatsapp_sender import signed_certificate_url
 
     cert = db.get(Certificate, cert_id)
     if not cert:
@@ -248,12 +248,10 @@ def whatsapp_links(cert_id: int, db: Session = Depends(get_db)):
         raise HTTPException(422, "Certificate PDF has not been rendered yet")
 
     org = get_org_settings(db)
-    doc_url = signed_certificate_url(cert)
     message = (
         f"Dear {cert.supplier.name},\n\n"
         f"Your Certificate of Deduction of Tax {cert.certificate_no} "
-        f"for the period {cert.period} is ready.\n"
-        f"Download it here: {doc_url}\n\n"
+        f"for the period {cert.period} is attached.\n\n"
         f"Regards,\n{org.officer_name or ''}"
         + (f"\n{org.company_name}" if org.company_name else "")
     )
@@ -267,7 +265,7 @@ def whatsapp_links(cert_id: int, db: Session = Depends(get_db)):
                 "recipient": number,
                 "url": f"https://wa.me/{digits}?text={quote(message)}",
             })
-    return {"links": links, "document_url": doc_url, "message": message}
+    return {"links": links, "message": message}
 
 
 @router.post("/dispatch/process")
@@ -340,6 +338,16 @@ def update_org(body: OrgSettingsIn, db: Session = Depends(get_db)):
         setattr(s, field, value)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/settings/org/test-email")
+def test_email(db: Session = Depends(get_db)):
+    s = get_org_settings(db)
+    try:
+        recipient = send_test_email(s)
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+    return {"ok": True, "recipient": recipient}
 
 
 @router.post("/settings/org/logo")

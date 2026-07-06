@@ -44,6 +44,16 @@ export default function Settings() {
     setNotice("Settings saved.");
   }
 
+  async function testEmail() {
+    try {
+      await saveOrg();
+      const res = await api.testEmail();
+      setNotice(`Test email sent to ${res.recipient}.`);
+    } catch (err) {
+      setNotice(`Email test failed: ${err.message}`);
+    }
+  }
+
   async function saveNumbering() {
     await api.updateNumbering({
       ...num,
@@ -136,7 +146,10 @@ export default function Settings() {
 
       {/* SMTP */}
       <section className="card p-5 space-y-3">
-        <h2 className="font-medium">Email (SMTP)</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="font-medium mr-auto">Email (SMTP)</h2>
+          <button className="btn-ghost" onClick={testEmail}>Send test email</button>
+        </div>
         <Field label="Provider preset">
           <select className="input" onChange={(e) => setOrg({ ...org, ...SMTP_PRESETS[e.target.value] })}>
             {Object.keys(SMTP_PRESETS).map((k) => <option key={k}>{k}</option>)}

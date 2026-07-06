@@ -1,8 +1,10 @@
 """Tests: Excel import parsing, aggregation math against a known sample,
 concurrent number allocation, anomaly detection, and offline dispatch queue."""
 import os
+import smtplib
 import threading
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
@@ -33,6 +35,8 @@ from app.services.certificate_generator import (
     get_org_settings,
 )
 from app.services.dispatch.queue import DispatchBlocked, enqueue_dispatch, process_queue
+from app.services.dispatch.email_sender import send_test_email
+from app.services.dispatch.whatsapp_sender import send_certificate_whatsapp
 from app.services.excel_import import (
     fiscal_year_for,
     import_depot_workbook,
@@ -279,6 +283,171 @@ def test_queue_retries_and_fails_after_max_attempts(db, sample_xlsx, monkeypatch
     assert job.status == DispatchStatus.FAILED
     assert job.attempts == 5
     assert "network down" in job.last_error
+
+
+def test_send_test_email_uses_settings_and_recipient(db, monkeypatch):
+    org = get_org_settings(db)
+    org.company_name = "Acme Ltd"
+    org.officer_email = "officer@example.com"
+    org.smtp_host = "smtp.example.com"
+    org.smtp_port = 587
+    org.smtp_from = "tax@example.com"
+    org.smtp_user = "tax@example.com"
+    org.smtp_password = "app-password"
+    org.smtp_use_tls = True
+    db.commit()
+
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            sent["connect"] = (host, port, timeout)
+
+        def starttls(self):
+            sent["tls"] = True
+
+        def login(self, user, password):
+            sent["login"] = (user, password)
+
+        def send_message(self, msg):
+            sent["to"] = msg["To"]
+            sent["from"] = msg["From"]
+            sent["subject"] = msg["Subject"]
+
+        def quit(self):
+            sent["quit"] = True
+
+    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+
+    assert send_test_email(org) == "officer@example.com"
+    assert sent["connect"] == ("smtp.example.com", 587, 30)
+    assert sent["tls"] is True
+    assert sent["login"] == ("tax@example.com", "app-password")
+    assert sent["to"] == "officer@example.com"
+    assert "tax@example.com" in sent["from"]
+    assert sent["subject"] == "Tax Certificate SMTP test"
+
+
+def test_send_test_email_reports_auth_failure(db, monkeypatch):
+    org = get_org_settings(db)
+    org.smtp_host = "smtp.example.com"
+    org.smtp_from = "tax@example.com"
+    org.smtp_user = "tax@example.com"
+    org.smtp_password = "bad"
+    db.commit()
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            raise smtplib.SMTPAuthenticationError(535, b"Invalid credentials")
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+
+    with pytest.raises(RuntimeError, match="SMTP authentication failed"):
+        send_test_email(org, "officer@example.com")
+
+
+def test_whatsapp_cloud_sends_document_without_caption_link(db, monkeypatch):
+    org = get_org_settings(db)
+    org.wa_provider = "cloud"
+    org.wa_token = "token"
+    org.wa_phone_number_id = "phone-id"
+    db.commit()
+    cert = Certificate(id=123, certificate_no="ACME/2025-26/1", period="2025-26")
+    sent = {}
+
+    class FakeResp:
+        def raise_for_status(self):
+            sent["raised"] = False
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent["url"] = url
+        sent["headers"] = headers
+        sent["json"] = json
+        sent["timeout"] = timeout
+        return FakeResp()
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    monkeypatch.setattr(
+        "app.services.dispatch.whatsapp_sender.get_settings",
+        lambda: SimpleNamespace(
+            public_base_url="https://tax.example.com",
+            link_signing_secret="test-secret",
+        ),
+    )
+
+    send_certificate_whatsapp(org, cert, "+8801711111111")
+
+    doc = sent["json"]["document"]
+    assert sent["json"]["type"] == "document"
+    assert "/public/certificates/123" in doc["link"]
+    assert "Download:" not in doc["caption"]
+    assert "http" not in doc["caption"]
+    assert doc["filename"] == "ACME_2025-26_1.pdf"
+
+
+def test_whatsapp_twilio_sends_media_without_body_link(db, monkeypatch):
+    org = get_org_settings(db)
+    org.wa_provider = "twilio"
+    org.wa_twilio_sid = "sid"
+    org.wa_twilio_auth = "auth"
+    org.wa_twilio_from = "+15550000000"
+    db.commit()
+    cert = Certificate(id=456, certificate_no="ACME/2025-26/2", period="2025-26")
+    sent = {}
+
+    class FakeResp:
+        def raise_for_status(self):
+            sent["raised"] = False
+
+    def fake_post(url, auth=None, data=None, timeout=None):
+        sent["url"] = url
+        sent["auth"] = auth
+        sent["data"] = data
+        sent["timeout"] = timeout
+        return FakeResp()
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    monkeypatch.setattr(
+        "app.services.dispatch.whatsapp_sender.get_settings",
+        lambda: SimpleNamespace(
+            public_base_url="https://tax.example.com",
+            link_signing_secret="test-secret",
+        ),
+    )
+
+    send_certificate_whatsapp(org, cert, "+8801711111111")
+
+    assert "/public/certificates/456" in sent["data"]["MediaUrl"]
+    assert "Download:" not in sent["data"]["Body"]
+    assert "http" not in sent["data"]["Body"]
+
+
+def test_whatsapp_document_send_rejects_localhost_base_url(db, monkeypatch):
+    org = get_org_settings(db)
+    org.wa_provider = "cloud"
+    org.wa_token = "token"
+    org.wa_phone_number_id = "phone-id"
+    db.commit()
+    cert = Certificate(id=789, certificate_no="ACME/2025-26/3", period="2025-26")
+    monkeypatch.setattr(
+        "app.services.dispatch.whatsapp_sender.get_settings",
+        lambda: SimpleNamespace(
+            public_base_url="http://localhost:8000",
+            link_signing_secret="test-secret",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="public HTTPS PUBLIC_BASE_URL"):
+        send_certificate_whatsapp(org, cert, "+8801711111111")
 
 
 # ------------------------------------------------------ Rate hook -----------

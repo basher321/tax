@@ -193,7 +193,7 @@ def render_certificate_pdf(db, cert) -> str:
                 str(ln.sl), _fmt_date(ln.date_of_payment),
                 Paragraph(ln.description or "", P_CELL), ln.section or "",
                 _fmt_amt(ln.amount_of_payment), _fmt_amt(ln.amount_of_tax_deducted),
-                Paragraph(ln.remarks or "", P_CELL),
+                Paragraph(cert.remarks or ln.remarks or "", P_CELL),
             ])
         else:
             s6_rows.append([str(i + 1), "", "", "", "", "", ""])
@@ -275,11 +275,6 @@ def render_certificate_pdf(db, cert) -> str:
         ["", Paragraph("Certified that the information given above is correct "
                        "and complete.", P_CELL)],
     ]
-    if cert.remarks:
-        aiw_rows.append([
-            Paragraph("<b>Remarks:</b>", P_CELL),
-            Paragraph(cert.remarks, P_CELL),
-        ])
     aiw = Table(aiw_rows, colWidths=[35 * mm, W - 35 * mm])
     aiw.setStyle(TableStyle([
         ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),

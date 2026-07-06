@@ -3,6 +3,37 @@ import { api } from "../api/client.js";
 
 const fmt = (n) => (n == null ? "" : Number(n).toLocaleString());
 
+const inDateRange = (from, to, dateFrom, dateTo) => {
+  if (!dateFrom && !dateTo) return true;
+  const start = from || to;
+  const end = to || from;
+  if (!start && !end) return false;
+  return (!dateTo || start <= dateTo) && (!dateFrom || end >= dateFrom);
+};
+
+const normalizeAnomalies = (items) =>
+  Array.isArray(items)
+    ? items.map((a) => ({
+        code: a?.code || "ANOMALY",
+        message: a?.message || "Dispatch is blocked by an anomaly check.",
+      }))
+    : [];
+
+async function blockedAnomalies(certId, detail) {
+  const fromError = normalizeAnomalies(detail?.anomalies);
+  if (fromError.length) return fromError;
+  try {
+    const fromApi = normalizeAnomalies(await api.anomalies(certId));
+    if (fromApi.length) return fromApi;
+  } catch {
+    // Fall through to the generic row below.
+  }
+  return [{
+    code: "BLOCKED",
+    message: "Dispatch is blocked, but the anomaly details could not be loaded.",
+  }];
+}
+
 /* ------------------------------------------------------------------ */
 /* Preview modal: fixed layout, read-only except Remarks               */
 /* ------------------------------------------------------------------ */
@@ -12,7 +43,6 @@ function Preview({ certId, onClose }) {
   const [remarks, setRemarks] = useState("");
   const [override, setOverride] = useState("");
   const [notice, setNotice] = useState(null);
-  const [waLinks, setWaLinks] = useState(null);
 
   const load = () =>
     Promise.all([api.getCertificate(certId), api.anomalies(certId)]).then(
@@ -23,12 +53,11 @@ function Preview({ certId, onClose }) {
   async function saveRemarks() {
     const c = await api.updateRemarks(certId, remarks);
     setCert(c);
-    setNotice("Remarks saved â€” PDF re-rendered.");
+    setNotice("Remarks saved - PDF re-rendered.");
   }
 
   async function sendEmail() {
     setNotice(null);
-    setWaLinks(null);
     try {
       const jobs = await api.dispatch(certId, {
         channel: "email",
@@ -47,7 +76,7 @@ function Preview({ certId, onClose }) {
       setNotice(`Email: ${jobs.map((j) => `${j.recipient} -> ${j.status}`).join(", ")}`);
     } catch (err) {
       if (err.detail?.blocked) {
-        setAnomalies(err.detail.anomalies);
+        setAnomalies(await blockedAnomalies(certId, err.detail));
         setNotice("Send blocked. Fix the anomalies below, or enter an override reason and retry.");
       } else {
         setNotice(err.message);
@@ -58,17 +87,46 @@ function Preview({ certId, onClose }) {
   async function sendWhatsApp() {
     setNotice(null);
     try {
-      const res = await api.whatsappLinks(certId);
-      if (!res.links.length) {
-        setNotice("No WhatsApp number on record for this supplier.");
+      const jobs = await api.dispatch(certId, {
+        channel: "whatsapp",
+        override_reason: override || undefined,
+        user: "web-ui",
+      });
+      const failed = jobs.find((j) => j.error);
+      if (failed) {
+        if (
+          failed.error.includes("credentials not configured") ||
+          failed.error.includes("PUBLIC_BASE_URL") ||
+          failed.error.includes("public HTTPS")
+        ) {
+          if (await openManualWhatsApp()) {
+            setNotice("WhatsApp API is not ready for automatic document sending. The PDF and WhatsApp chat were opened so you can attach the certificate manually.");
+          }
+          return;
+        }
+        setNotice(`WhatsApp failed: ${failed.error}`);
         return;
       }
-      window.open(res.links[0].url, "_blank", "noopener");
-      setWaLinks(res.links);
-      setNotice("WhatsApp opened with a pre-filled message and signed certificate link.");
+      setNotice(`WhatsApp: ${jobs.map((j) => `${j.recipient} -> ${j.status}`).join(", ")}`);
     } catch (err) {
-      setNotice(err.message);
+      if (err.detail?.blocked) {
+        setAnomalies(await blockedAnomalies(certId, err.detail));
+        setNotice("Send blocked. Fix the anomalies below, or enter an override reason and retry.");
+      } else {
+        setNotice(err.message);
+      }
     }
+  }
+
+  async function openManualWhatsApp() {
+    const res = await api.whatsappLinks(certId);
+    if (!res.links.length) {
+      setNotice("No WhatsApp number on record for this supplier.");
+      return false;
+    }
+    window.open(api.pdfUrl(cert.id), "_blank", "noopener");
+    window.open(res.links[0].url, "_blank", "noopener");
+    return true;
   }
 
   if (!cert) return null;
@@ -76,7 +134,7 @@ function Preview({ certId, onClose }) {
   return (
     <div className="fixed inset-0 bg-ink/50 flex items-start justify-center overflow-auto p-6 z-20">
       <div className="bg-white rounded-lg w-full max-w-4xl">
-        {/* action bar â€” all dispatch options live here, inside Certificate Issue */}
+        {/* action bar - all dispatch options live here, inside Certificate Issue */}
         <div className="flex items-center gap-2 px-5 py-3 border-b border-rule sticky top-0 bg-white rounded-t-lg">
           <div className="font-mono text-sm mr-auto">{cert.certificate_no}</div>
           <button className="btn-ghost" onClick={sendEmail}>Send email</button>
@@ -90,39 +148,26 @@ function Preview({ certId, onClose }) {
         </div>
 
         {notice && <p className="px-5 pt-3 text-sm text-ledger">{notice}</p>}
-        {waLinks?.length > 1 && (
-          <div className="mx-5 mt-3 rounded border border-rule bg-paper p-3 text-sm">
-            <p className="font-medium mb-2">Additional WhatsApp contacts</p>
-            <div className="flex flex-wrap gap-2">
-              {waLinks.map((link) => (
-                <a key={link.recipient} className="btn-ghost btn-sm" href={link.url} target="_blank" rel="noreferrer">
-                  {link.recipient}
-                </a>
-              ))}
-            </div>
-          </div>
-        )}
-
         {anomalies.length > 0 && (
           <div className="mx-5 mt-3 border border-red-300 bg-red-50 rounded p-3 text-sm">
             <p className="font-medium text-red-800 mb-1">
-              Anomalies â€” sending is blocked until fixed or overridden:
+              Anomalies - sending is blocked until fixed or overridden:
             </p>
             <ul className="list-disc ml-5 text-red-800 space-y-0.5">
-              {anomalies.map((a, i) => (
-                <li key={i}><span className="font-mono text-xs">{a.code}</span> â€” {a.message}</li>
+              {normalizeAnomalies(anomalies).map((a, i) => (
+                <li key={i}><span className="font-mono text-xs">{a.code}</span> - {a.message}</li>
               ))}
             </ul>
             <input
               className="input mt-2"
-              placeholder="Override reason (logged with your name)â€¦"
+              placeholder="Override reason (logged with your name)..."
               value={override}
               onChange={(e) => setOverride(e.target.value)}
             />
           </div>
         )}
 
-        {/* Fixed certificate layout â€” mirrors certificate_format.jpeg.
+        {/* Fixed certificate layout - mirrors certificate_format.jpeg.
             Everything is read-only; ONLY Remarks below is editable. */}
         <div className="p-6 text-sm">
           <h2 className="text-center font-semibold text-base">Certificate of Deduction of Tax</h2>
@@ -138,7 +183,7 @@ function Preview({ certId, onClose }) {
               <tr><td className="w-6">1</td><td className="font-medium w-64">Name of Payee:</td><td colSpan={2}>{cert.supplier.name}</td></tr>
               <tr><td>2</td><td className="font-medium">Address of Payee:</td><td colSpan={2}>{cert.supplier.address || ""}</td></tr>
               <tr><td>3</td><td>Does the person have a Twelve-digit TIN?</td>
-                <td>Yes {cert.tin?.length === 12 ? "â˜‘" : "â˜"}</td><td>No {cert.tin?.length === 12 ? "â˜" : "â˜‘"}</td></tr>
+                <td>Yes {cert.tin?.length === 12 ? "[x]" : "[ ]"}</td><td>No {cert.tin?.length === 12 ? "[ ]" : "[x]"}</td></tr>
               <tr><td>4</td><td>Twelve-digit TIN (if answer of 03 is Yes)</td><td className="font-mono" colSpan={2}>E-TIN&nbsp;&nbsp;{cert.tin}</td></tr>
               <tr><td>5</td><td>Period for which payment is made From (date) to (date)</td>
                 <td colSpan={2}>From {cert.period_from} to {cert.period_to}</td></tr>
@@ -160,7 +205,7 @@ function Preview({ certId, onClose }) {
                   <td className="text-center">{l.section}</td>
                   <td className="text-right font-mono">{fmt(l.amount_of_payment)}</td>
                   <td className="text-right font-mono">{fmt(l.amount_of_tax_deducted)}</td>
-                  <td>{l.remarks}</td>
+                  <td>{cert.remarks || l.remarks}</td>
                 </tr>
               ))}
               <tr className="font-semibold">
@@ -200,9 +245,6 @@ function Preview({ certId, onClose }) {
 
           <p className="mt-3"><span className="font-medium">Amount In word:</span> {cert.amount_in_words}</p>
           <p className="text-ink/70">Certified that the information given above is correct and complete.</p>
-          {cert.remarks && (
-            <p className="mt-1"><span className="font-medium">Remarks:</span> {cert.remarks}</p>
-          )}
 
           {/* the ONLY editable field */}
           <div className="mt-4">
@@ -241,6 +283,8 @@ export default function CertificateIssue() {
     const tin = filters.tin.trim().toLowerCase();
     const bin = filters.bin.trim().toLowerCase();
     const supplierName = filters.supplier_name.trim().toLowerCase();
+    const dateFrom = filters.date_from;
+    const dateTo = filters.date_to;
 
     return pending.filter((g) => {
       const matchesTin = !tin || String(g.tin || "").toLowerCase().includes(tin);
@@ -248,9 +292,10 @@ export default function CertificateIssue() {
       const matchesName =
         !supplierName ||
         String(g.supplier_name || "").toLowerCase().includes(supplierName);
-      return matchesTin && matchesBin && matchesName;
+      const matchesDate = inDateRange(g.payment_from, g.payment_to, dateFrom, dateTo);
+      return matchesTin && matchesBin && matchesName && matchesDate;
     });
-  }, [filters.bin, filters.supplier_name, filters.tin, pending]);
+  }, [filters.bin, filters.date_from, filters.date_to, filters.supplier_name, filters.tin, pending]);
 
   function applyFilters() {
     setPage(1);
@@ -287,13 +332,13 @@ export default function CertificateIssue() {
       <h1 className="text-xl font-semibold">Certificate Issue</h1>
       {notice && <p className="text-sm text-ledger">{notice}</p>}
 
-      {/* Search & filter â€” TIN, BIN, Supplier Name, Date range (combinable) */}
+      {/* Search & filter - TIN, BIN, Supplier Name, Date range (combinable) */}
       <div className="card p-4 grid grid-cols-6 gap-3 items-end">
         <div><span className="label">TIN</span><input className="input font-mono" value={filters.tin} onChange={set("tin")} onKeyDown={submitOnEnter} /></div>
         <div><span className="label">BIN</span><input className="input font-mono" value={filters.bin} onChange={set("bin")} onKeyDown={submitOnEnter} /></div>
         <div><span className="label">Supplier name</span><input className="input" value={filters.supplier_name} onChange={set("supplier_name")} onKeyDown={submitOnEnter} /></div>
-        <div><span className="label">Issued from</span><input type="date" className="input" value={filters.date_from} onChange={set("date_from")} /></div>
-        <div><span className="label">Issued to</span><input type="date" className="input" value={filters.date_to} onChange={set("date_to")} /></div>
+        <div><span className="label">Date from</span><input type="date" className="input" value={filters.date_from} onChange={set("date_from")} /></div>
+        <div><span className="label">Date to</span><input type="date" className="input" value={filters.date_to} onChange={set("date_to")} /></div>
         <button className="btn-primary" onClick={applyFilters}>Search</button>
       </div>
 
@@ -307,7 +352,7 @@ export default function CertificateIssue() {
           <thead>
             <tr className="text-left text-xs uppercase tracking-wide text-ink/50 border-b border-rule">
               <th className="px-5 py-2 w-8"></th><th className="py-2">Supplier</th>
-              <th>TIN</th><th>Period</th><th className="text-right">Rows</th>
+              <th>TIN</th><th>Period</th><th>Payment dates</th><th className="text-right">Rows</th>
               <th className="text-right">Payment</th><th className="text-right pr-3">TDS</th><th></th>
             </tr>
           </thead>
@@ -321,6 +366,7 @@ export default function CertificateIssue() {
                   <td className="py-1.5">{g.supplier_name}</td>
                   <td className="font-mono">{g.tin}</td>
                   <td>{g.period}</td>
+                  <td>{g.payment_from || ""}{g.payment_to && g.payment_to !== g.payment_from ? ` to ${g.payment_to}` : ""}</td>
                   <td className="text-right">{g.row_count}</td>
                   <td className="text-right font-mono">{fmt(g.total_payment)}</td>
                   <td className="text-right font-mono pr-3">{fmt(g.total_tax_deducted)}</td>
@@ -331,7 +377,7 @@ export default function CertificateIssue() {
               );
             })}
             {filteredPending.length === 0 && (
-              <tr><td colSpan={8} className="p-5 text-ink/50">No pending groupings match these filters.</td></tr>
+              <tr><td colSpan={9} className="p-5 text-ink/50">No pending groupings match these filters.</td></tr>
             )}
           </tbody>
         </table>
@@ -349,7 +395,7 @@ export default function CertificateIssue() {
           <thead>
             <tr className="text-left text-xs uppercase tracking-wide text-ink/50 border-b border-rule">
               <th className="px-5 py-2">Certificate No.</th><th>Supplier</th><th>TIN</th>
-              <th>Period</th><th className="text-right">TDS</th><th>Status</th><th></th>
+              <th>Period</th><th>Issued</th><th className="text-right">TDS</th><th>Status</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -359,6 +405,7 @@ export default function CertificateIssue() {
                 <td>{c.supplier.name}</td>
                 <td className="font-mono">{c.tin}</td>
                 <td>{c.period}</td>
+                <td>{c.issue_date}</td>
                 <td className="text-right font-mono">{fmt(c.total_tax_deducted)}</td>
                 <td><span className={`text-xs px-1.5 py-0.5 rounded ${c.status === "sent" ? "bg-ledger/10 text-ledger" : "bg-paper"}`}>{c.status}</span></td>
                 <td className="pr-4 text-right">
@@ -367,7 +414,7 @@ export default function CertificateIssue() {
               </tr>
             ))}
             {results.items.length === 0 && (
-              <tr><td colSpan={7} className="p-5 text-ink/50">No certificates match these filters.</td></tr>
+              <tr><td colSpan={8} className="p-5 text-ink/50">No certificates match these filters.</td></tr>
             )}
           </tbody>
         </table>
