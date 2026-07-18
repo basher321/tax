@@ -7,9 +7,11 @@ import app.models  # register all tables
 from app.database import Base
 
 config = context.config
+# configparser treats "%" as interpolation syntax, which breaks any
+# URL-encoded password (e.g. "%40" for "@") in DATABASE_URL — escape it.
 config.set_main_option(
     "sqlalchemy.url",
-    os.environ.get("DATABASE_URL", "sqlite:///./tax_certificates.db"),
+    os.environ.get("DATABASE_URL", "sqlite:///./tax_certificates.db").replace("%", "%%"),
 )
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
