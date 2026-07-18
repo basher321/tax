@@ -35,7 +35,11 @@ SOURCE_COLUMNS = {
     "Description of Payment": "description_of_payment",
     "Sum of Bill Amount": "sum_of_bill_amount",
     "Sum of TDS": "sum_of_tds",
-    "Sum of VDS": "sum_of_vds",
+    # Sum of VDS is intentionally excluded from import/field mapping/storage.
+    # Base Amount / TDS Rate are optional: when both are present, TDS is
+    # computed as Base Amount x TDS Rate instead of taken literally.
+    "Base Amount": "_base_amount",
+    "TDS Rate": "_tds_rate",
     "Match": "match",
     "Section": "section",
     "TIN": "tin",
@@ -144,10 +148,15 @@ def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> pd.DataFrame:
     return df
 
 
-def _get_or_create_supplier(db: Session, tin: str, name: str, address, email, wa) -> Supplier:
-    sup = db.query(Supplier).filter(Supplier.tin == tin).first()
+def _get_or_create_supplier(db: Session, company_id: int, tin: str, name: str,
+                            address, email, wa) -> Supplier:
+    sup = (
+        db.query(Supplier)
+        .filter(Supplier.company_id == company_id, Supplier.tin == tin)
+        .first()
+    )
     if not sup:
-        sup = Supplier(tin=tin, name=name, address=address)
+        sup = Supplier(company_id=company_id, tin=tin, name=name, address=address)
         db.add(sup)
         db.flush()
     else:
@@ -165,11 +174,11 @@ def _get_or_create_supplier(db: Session, tin: str, name: str, address, email, wa
     return sup
 
 
-def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
+def import_depot_workbook(db: Session, path: str, filename: str, company_id: int) -> ImportBatch:
     """Import the Depot-SCB sheet: validate row by row, persist good rows,
     record errors for bad ones. Never aborts on a single bad row."""
     df = load_depot_sheet(path)
-    batch = ImportBatch(filename=filename, kind="depot", total_rows=len(df))
+    batch = ImportBatch(company_id=company_id, filename=filename, kind="depot", total_rows=len(df))
     db.add(batch)
     db.flush()
 
@@ -182,7 +191,13 @@ def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
             return row.get(col)
 
         # --- required fields ---
+        has_base_rate = (
+            _parse_number(val("Base Amount")) is not None
+            and _parse_number(val("TDS Rate")) is not None
+        )
         for col in REQUIRED_FIELDS:
+            if col == "Sum of TDS" and has_base_rate:
+                continue  # TDS will be computed from Base Amount x TDS Rate instead
             if _clean(val(col)) is None and _parse_number(val(col)) is None:
                 row_errors.append((col, f"Required field '{col}' is missing"))
 
@@ -195,8 +210,8 @@ def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
 
         # --- numeric fields ---
         numbers = {}
-        for col in ("Sum of Bill Amount", "Sum of TDS", "Sum of VDS",
-                    "Total Challan Amount"):
+        for col in ("Sum of Bill Amount", "Sum of TDS", "Total Challan Amount",
+                    "Base Amount", "TDS Rate"):
             v = val(col)
             if v is not None and not (isinstance(v, float) and pd.isna(v)):
                 n = _parse_number(v)
@@ -205,6 +220,14 @@ def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
                 numbers[col] = n
             else:
                 numbers[col] = None
+
+        # Base Amount x TDS Rate overrides the literal Sum of TDS column when
+        # both are present and parse as numbers; otherwise Sum of TDS (already
+        # based on Sum of Bill Amount upstream in the sheet) is used as-is.
+        if numbers["Base Amount"] is not None and numbers["TDS Rate"] is not None:
+            computed_tds = round(numbers["Base Amount"] * numbers["TDS Rate"], 2)
+        else:
+            computed_tds = numbers["Sum of TDS"]
 
         # --- dates ---
         cheque_date = _parse_date(val("Cheque Date"))
@@ -232,13 +255,14 @@ def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
             continue
 
         supplier = _get_or_create_supplier(
-            db, tin, _clean(val("Supplier Name")),
+            db, company_id, tin, _clean(val("Supplier Name")),
             _clean(val("Supplier Address")), _clean(val("Email")),
             _clean(val("WhatsApp No.")),
         )
 
         basis = month_date or cheque_date
         txn = Transaction(
+            company_id=company_id,
             batch_id=batch.id,
             supplier_id=supplier.id,
             category=_clean(val("Category")),
@@ -252,8 +276,7 @@ def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
             depot_code=_clean(val("Depot Code")),
             description_of_payment=_clean(val("Description of Payment")),
             sum_of_bill_amount=numbers["Sum of Bill Amount"],
-            sum_of_tds=numbers["Sum of TDS"],
-            sum_of_vds=numbers["Sum of VDS"],
+            sum_of_tds=computed_tds,
             match=_clean(val("Match")),
             section=_clean(val("Section")),
             tin=tin,
@@ -275,15 +298,17 @@ def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
     return batch
 
 
-def import_challan_file(db: Session, path: str, filename: str) -> tuple[ImportBatch, list[int]]:
+def import_challan_file(db: Session, path: str, filename: str,
+                        company_id: int) -> tuple[ImportBatch, list[int]]:
     """Challan upload: auto-populate Challan No/Date/Total Challan Amount/Section
-    and the adjusted Sum of Bill Amount/TDS/VDS on matching (TIN or supplier
-    name, Month) transaction records. Manual override afterward happens via
+    and the adjusted Sum of Bill Amount/TDS on matching (TIN or supplier name,
+    Month) transaction records, scoped to the given company. VDS is never
+    auto-populated. Manual override afterward happens via
     PATCH /api/transactions/{id}.
 
     Expected columns (flexible header row): TIN and/or Supplier Name, Month,
     Challan No, Challan Date, Total Challan Amount, Section, and optionally
-    Sum of Bill Amount / Sum of TDS / Sum of VDS (same headers as Depot-SCB).
+    Sum of Bill Amount / Sum of TDS (same headers as Depot-SCB).
 
     Returns (batch, updated_transaction_ids) so the route can surface exactly
     which rows changed for review/manual override.
@@ -313,9 +338,8 @@ def import_challan_file(db: Session, path: str, filename: str) -> tuple[ImportBa
     c_sec = col("Section")
     c_bill = col("Sum of Bill Amount")
     c_tds = col("Sum of TDS")
-    c_vds = col("Sum of VDS")
 
-    batch = ImportBatch(filename=filename, kind="challan", total_rows=len(df))
+    batch = ImportBatch(company_id=company_id, filename=filename, kind="challan", total_rows=len(df))
     db.add(batch)
     db.flush()
 
@@ -330,7 +354,7 @@ def import_challan_file(db: Session, path: str, filename: str) -> tuple[ImportBa
                                   column=c_no, message="Missing challan number"))
             continue
 
-        q = db.query(Transaction)
+        q = db.query(Transaction).filter(Transaction.company_id == company_id)
         tin = re.sub(r"\D", "", _clean(row.get(c_tin)) or "") if c_tin else ""
         name = _clean(row.get(c_name)) if c_name else None
         month = _clean(row.get(c_month)) if c_month else None
@@ -359,7 +383,6 @@ def import_challan_file(db: Session, path: str, filename: str) -> tuple[ImportBa
         ch_sec = _clean(row.get(c_sec)) if c_sec else None
         ch_bill = _parse_number(row.get(c_bill)) if c_bill else None
         ch_tds = _parse_number(row.get(c_tds)) if c_tds else None
-        ch_vds = _parse_number(row.get(c_vds)) if c_vds else None
         for t in matches:
             t.challan_no = challan_no
             if ch_date:
@@ -372,8 +395,6 @@ def import_challan_file(db: Session, path: str, filename: str) -> tuple[ImportBa
                 t.sum_of_bill_amount = ch_bill
             if ch_tds is not None:
                 t.sum_of_tds = ch_tds
-            if ch_vds is not None:
-                t.sum_of_vds = ch_vds
             updated_ids.append(t.id)
         ok += 1
 

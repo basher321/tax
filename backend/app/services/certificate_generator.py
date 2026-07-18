@@ -12,8 +12,10 @@ from ..models.entities import (
     CertificateChallanLine,
     CertificateLine,
     CertStatus,
+    Company,
     OrgSettings,
     PartyType,
+    Signature,
     Supplier,
 )
 from .aggregation import build_certificate_data
@@ -35,11 +37,43 @@ def get_org_settings(db: Session) -> OrgSettings:
     return s
 
 
-def generate_certificate(db: Session, tin: str, period: str) -> Certificate:
+def get_company(db: Session, company_id: int) -> Company:
+    company = db.get(Company, company_id)
+    if not company:
+        raise GenerationError(f"No company with id {company_id}")
+    return company
+
+
+def get_default_company(db: Session) -> Company:
+    """First company flagged is_default, else the first company created."""
+    company = db.query(Company).filter(Company.is_default.is_(True)).first()
+    if not company:
+        company = db.query(Company).order_by(Company.id).first()
+    if not company:
+        raise GenerationError("No company exists yet — create one in Settings first.")
+    return company
+
+
+def _resolve_signature_id(db: Session, company_id: int, signature_id: int | None) -> int | None:
+    if signature_id is not None:
+        sig = db.get(Signature, signature_id)
+        if not sig or sig.company_id != company_id:
+            raise GenerationError("Signature does not belong to this company")
+        return signature_id
+    default_sig = (
+        db.query(Signature)
+        .filter(Signature.company_id == company_id, Signature.is_default.is_(True))
+        .first()
+    )
+    return default_sig.id if default_sig else None
+
+
+def generate_certificate(db: Session, company_id: int, tin: str, period: str,
+                         signature_id: int | None = None) -> Certificate:
     existing = (
         db.query(Certificate)
-        .filter(Certificate.tin == tin, Certificate.period == period,
-                Certificate.status != CertStatus.VOID)
+        .filter(Certificate.company_id == company_id, Certificate.tin == tin,
+                Certificate.period == period, Certificate.status != CertStatus.VOID)
         .first()
     )
     if existing:
@@ -48,11 +82,11 @@ def generate_certificate(db: Session, tin: str, period: str) -> Certificate:
             f"({existing.certificate_no})"
         )
 
-    org = get_org_settings(db)
+    company = get_company(db, company_id)
     data = build_certificate_data(
-        db, tin, period,
-        default_description=org.default_description or "Supply of Goods",
-        default_bank=org.default_bank_name,
+        db, company_id, tin, period,
+        default_description=company.default_description or "Supply of Goods",
+        default_bank=company.default_bank_name,
     )
     if data is None:
         raise GenerationError(f"No transactions found for TIN {tin} / {period}")
@@ -67,10 +101,13 @@ def generate_certificate(db: Session, tin: str, period: str) -> Certificate:
             f"'{supplier.party_type.value}', certificates are supplier-only."
         )
 
-    cert_no = allocate_certificate_number(db, period)
+    cert_no = allocate_certificate_number(db, company_id, period)
+    resolved_signature_id = _resolve_signature_id(db, company_id, signature_id)
 
     cert = Certificate(
         certificate_no=cert_no,
+        company_id=company_id,
+        signature_id=resolved_signature_id,
         supplier_id=supplier.id,
         tin=tin,
         period=period,
@@ -83,6 +120,7 @@ def generate_certificate(db: Session, tin: str, period: str) -> Certificate:
         has_12_digit_tin=bool(tin and len(tin) == 12),
         status=CertStatus.GENERATED,
         issue_date=date.today(),
+        issue_date_mode="auto",
     )
     db.add(cert)
     db.flush()

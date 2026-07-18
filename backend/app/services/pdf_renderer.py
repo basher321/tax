@@ -14,8 +14,11 @@ The layout is LOCKED — it reproduces certificate_format.jpeg exactly:
     Remarks + Total row (total of "amount relating" only)
   * Amount In word + certification line
   * Footer: officer Name / Designation / Email at left; "Signature and
-    seal" block at right with the uploaded seal+signature PNG and the
-    auto-generated date rendered UNDER the seal/signature.
+    seal" block at right — signature image above the label, the issue date
+    below the label, and the seal image below the date (bottom-most).
+  * Company letterhead: header image (if uploaded) before the title, footer
+    image (if uploaded) after the officer/signature block — both resolved
+    from the certificate's own company, never the currently-active UI company.
 
 No runtime configuration of this layout is exposed anywhere.
 """
@@ -86,6 +89,7 @@ def render_certificate_pdf(db, cert) -> str:
 
     settings = get_settings()
     org = get_org_settings(db)
+    company = cert.company
     out_dir = os.path.join(settings.storage_dir, "certificates")
     os.makedirs(out_dir, exist_ok=True)
     safe_no = (cert.certificate_no or f"cert-{cert.id}").replace("/", "_")
@@ -103,13 +107,22 @@ def render_certificate_pdf(db, cert) -> str:
     W = doc.width
     story = []
 
+    # ---------- Company letterhead header (this cert's own company) ----------
+    if company and company.letterhead_header_path and os.path.exists(company.letterhead_header_path):
+        header_img = _fitted_image(company.letterhead_header_path, W / mm, 28)
+        if header_img is not None:
+            header_img.hAlign = "CENTER"
+            story.append(header_img)
+            story.append(Spacer(1, 2 * mm))
+
     # ---------- Header (repeated once at document start, as in the format) ----
     title_block = [
         Paragraph("Certificate of Deduction of Tax", P_TITLE),
         Paragraph("[Section 145 of the Income Tax Act 2023]", P_SUB),
     ]
-    logo_img = (_fitted_image(org.logo_path, 24, 12)
-                if org.logo_path and os.path.exists(org.logo_path) else None)
+    logo_path = (company.logo_path if company and company.logo_path else org.logo_path)
+    logo_img = (_fitted_image(logo_path, 24, 12)
+                if logo_path and os.path.exists(logo_path) else None)
     if logo_img:
         header = Table([[logo_img, title_block, ""]],
                        colWidths=[26 * mm, W - 52 * mm, 26 * mm])
@@ -290,30 +303,32 @@ def render_certificate_pdf(db, cert) -> str:
     story.append(aiw)
     story.append(Spacer(1, 8 * mm))
 
-    # ---------- Footer: officer block + seal/signature + auto date -----------
+    # ---------- Footer: officer block + signature/seal stack + auto date -----
+    # Resolve signature: the certificate's own chosen Signature (set at
+    # generation time), else fall back to the legacy OrgSettings field.
+    signature_path = None
+    if cert.signature and cert.signature.image_path and os.path.exists(cert.signature.image_path):
+        signature_path = cert.signature.image_path
+    elif org.signature_path and os.path.exists(org.signature_path):
+        signature_path = org.signature_path
+
+    # Resolve seal: this cert's own company, else the legacy OrgSettings field.
+    seal_path = None
+    if company and company.seal_path and os.path.exists(company.seal_path):
+        seal_path = company.seal_path
+    elif org.seal_path and os.path.exists(org.seal_path):
+        seal_path = org.seal_path
+
     seal_cell = []
-    has_split_images = (
-        (org.signature_path and os.path.exists(org.signature_path))
-        or (org.seal_path and os.path.exists(org.seal_path))
-    )
-    if has_split_images:
-        # Preferred: separate signature + seal images, side by side.
-        sig_img = ((_fitted_image(org.signature_path, 26, 18) or "")
-                  if org.signature_path and os.path.exists(org.signature_path) else "")
-        seal_img = ((_fitted_image(org.seal_path, 26, 18) or "")
-                   if org.seal_path and os.path.exists(org.seal_path) else "")
-        pair = Table([[sig_img, seal_img]], colWidths=[27 * mm, 27 * mm])
-        pair.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ]))
-        seal_cell.append(pair)
-        seal_cell.append(Spacer(1, 1 * mm))
-    elif org.seal_signature_path and os.path.exists(org.seal_signature_path):
-        # Legacy: single combined image (backward compatible with orgs that
-        # never re-upload after the signature/seal split).
+    if signature_path:
+        sig_img = _fitted_image(signature_path, 40, 16)
+        if sig_img is not None:
+            sig_img.hAlign = "CENTER"
+            seal_cell.append(sig_img)
+            seal_cell.append(Spacer(1, 1 * mm))
+    elif not seal_path and org.seal_signature_path and os.path.exists(org.seal_signature_path):
+        # Fully legacy: neither a split signature nor a split seal is on
+        # file anywhere — fall back to the old combined image above the label.
         img = _fitted_image(org.seal_signature_path, 45, 22)
         if img is not None:
             img.hAlign = "CENTER"
@@ -323,12 +338,23 @@ def render_certificate_pdf(db, cert) -> str:
                                ParagraphStyle("ss", parent=P_CELL_B, alignment=1)))
     seal_cell.append(Paragraph(_fmt_issue(cert.issue_date),
                                ParagraphStyle("sd", parent=P_CELL, alignment=1)))
+    if seal_path:
+        # Seal renders below the date, at the very bottom of the block.
+        seal_cell.append(Spacer(1, 1 * mm))
+        seal_img = _fitted_image(seal_path, 30, 16)
+        if seal_img is not None:
+            seal_img.hAlign = "CENTER"
+            seal_cell.append(seal_img)
+
+    officer_name = (company and company.officer_name) or org.officer_name or ""
+    officer_designation = (company and company.officer_designation) or org.officer_designation or ""
+    officer_email = (company and company.officer_email) or org.officer_email or ""
 
     footer = Table(
         [[
-            [Paragraph(f"<b>Name:</b> {org.officer_name or ''}", P_CELL),
-             Paragraph(f"<b>Designation:</b> {org.officer_designation or ''}", P_CELL),
-             Paragraph(f"<b>Email:</b> {org.officer_email or ''}", P_CELL)],
+            [Paragraph(f"<b>Name:</b> {officer_name}", P_CELL),
+             Paragraph(f"<b>Designation:</b> {officer_designation}", P_CELL),
+             Paragraph(f"<b>Email:</b> {officer_email}", P_CELL)],
             seal_cell,
         ]],
         colWidths=[W - 60 * mm, 60 * mm],
@@ -339,6 +365,14 @@ def render_certificate_pdf(db, cert) -> str:
         ("TOPPADDING", (0, 0), (-1, -1), 4),
     ]))
     story.append(KeepTogether([footer]))
+
+    # ---------- Company letterhead footer (this cert's own company) ----------
+    if company and company.letterhead_footer_path and os.path.exists(company.letterhead_footer_path):
+        story.append(Spacer(1, 3 * mm))
+        footer_img = _fitted_image(company.letterhead_footer_path, W / mm, 22)
+        if footer_img is not None:
+            footer_img.hAlign = "CENTER"
+            story.append(footer_img)
 
     doc.build(story)
     return path

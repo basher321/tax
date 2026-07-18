@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { api } from "../api/client.js";
 import { PageHeader, Notice, EmptyState } from "../components/ui.jsx";
+import { useCompany } from "../context/CompanyContext.jsx";
 
+// Sum of VDS is intentionally excluded from import/challan/UI (item 2 & 7).
 const TXN_EDIT_FIELDS = [
   { key: "challan_no", label: "Challan No" },
   { key: "challan_date", label: "Challan Date", type: "date" },
@@ -9,13 +11,12 @@ const TXN_EDIT_FIELDS = [
   { key: "total_challan_amount", label: "Total Challan Amount", type: "number" },
   { key: "sum_of_bill_amount", label: "Sum of Bill Amount", type: "number" },
   { key: "sum_of_tds", label: "Sum of TDS", type: "number" },
-  { key: "sum_of_vds", label: "Sum of VDS", type: "number" },
 ];
 
 /* Challan file upload: auto-fills challan/amount fields on matching
    transactions, then lets the user manually override any auto-filled
    value before it feeds into certificate generation (item 7). */
-function ChallanPanel() {
+function ChallanPanel({ companyId }) {
   const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState(null);
   const [error, setError] = useState(null);
@@ -32,7 +33,7 @@ function ChallanPanel() {
     setRows({});
     setSavedIds({});
     try {
-      const result = await api.uploadChallan(file);
+      const result = await api.uploadChallan(companyId, file);
       setBatch(result);
       setRows(Object.fromEntries((result.updated_transactions || []).map((t) => [t.id, { ...t }])));
     } catch (err) {
@@ -68,9 +69,9 @@ function ChallanPanel() {
         title=""
         subtitle="Upload a challan file to auto-fill challan number/date and the adjusted bill/TDS/VDS amounts on matching transactions. Override any value below before generating certificates."
       >
-        <label className={`btn-primary cursor-pointer ${busy ? "opacity-60 pointer-events-none" : ""}`}>
+        <label className={`btn-primary cursor-pointer ${busy || !companyId ? "opacity-60 pointer-events-none" : ""}`}>
           {busy ? "Parsing..." : "Upload challan file"}
-          <input type="file" accept=".xlsx,.xls" className="hidden" onChange={handleFile} disabled={busy} />
+          <input type="file" accept=".xlsx,.xls" className="hidden" onChange={handleFile} disabled={busy || !companyId} />
         </label>
       </PageHeader>
 
@@ -161,7 +162,7 @@ function ChallanPanel() {
   );
 }
 
-function DepotPanel() {
+function DepotPanel({ companyId }) {
   const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState(null);
   const [error, setError] = useState(null);
@@ -183,7 +184,7 @@ function DepotPanel() {
     setError(null);
     setBatch(null);
     try {
-      setBatch(await api.uploadDepot(file));
+      setBatch(await api.uploadDepot(companyId, file));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -198,9 +199,9 @@ function DepotPanel() {
         title=""
         subtitle="Upload the Depot-SCB workbook. Every parsed row and column appears below."
       >
-        <label className={`btn-primary cursor-pointer ${busy ? "opacity-60 pointer-events-none" : ""}`}>
+        <label className={`btn-primary cursor-pointer ${busy || !companyId ? "opacity-60 pointer-events-none" : ""}`}>
           {busy ? "Parsing..." : "Upload .xlsx file"}
-          <input type="file" accept=".xlsx" className="hidden" onChange={handleFile} disabled={busy} />
+          <input type="file" accept=".xlsx" className="hidden" onChange={handleFile} disabled={busy || !companyId} />
         </label>
       </PageHeader>
 
@@ -273,6 +274,7 @@ function DepotPanel() {
 
 export default function Import() {
   const [tab, setTab] = useState("depot");
+  const { companyId } = useCompany();
 
   return (
     <div className="space-y-5">
@@ -293,7 +295,10 @@ export default function Import() {
           </button>
         </div>
       </div>
-      {tab === "depot" ? <DepotPanel /> : <ChallanPanel />}
+      {!companyId && (
+        <Notice kind="err">Select a company from the header above before importing.</Notice>
+      )}
+      {tab === "depot" ? <DepotPanel companyId={companyId} /> : <ChallanPanel companyId={companyId} />}
     </div>
   );
 }

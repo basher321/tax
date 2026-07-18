@@ -19,32 +19,84 @@ async function request(path, options = {}) {
   return res.json();
 }
 
+const qs = (params) =>
+  new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""))
+  ).toString();
+
 export const api = {
   dashboard: () => request("/dashboard"),
 
-  uploadDepot: (file) => {
+  // ---- Companies (multi-company foundation) ----
+  listCompanies: () => request("/companies"),
+  createCompany: (body) =>
+    request("/companies", { method: "POST", body: JSON.stringify(body) }),
+  updateCompany: (id, body) =>
+    request(`/companies/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  uploadCompanyLogo: (id, file) => {
+    const fd = new FormData(); fd.append("file", file);
+    return request(`/companies/${id}/logo`, { method: "POST", body: fd });
+  },
+  uploadCompanySeal: (id, file) => {
+    const fd = new FormData(); fd.append("file", file);
+    return request(`/companies/${id}/seal`, { method: "POST", body: fd });
+  },
+  uploadLetterheadHeader: (id, file) => {
+    const fd = new FormData(); fd.append("file", file);
+    return request(`/companies/${id}/letterhead/header`, { method: "POST", body: fd });
+  },
+  uploadLetterheadFooter: (id, file) => {
+    const fd = new FormData(); fd.append("file", file);
+    return request(`/companies/${id}/letterhead/footer`, { method: "POST", body: fd });
+  },
+  companyLogoUrl: (id) => `${BASE}/companies/${id}/logo`,
+  companySealUrl: (id) => `${BASE}/companies/${id}/seal`,
+  letterheadHeaderUrl: (id) => `${BASE}/companies/${id}/letterhead/header`,
+  letterheadFooterUrl: (id) => `${BASE}/companies/${id}/letterhead/footer`,
+
+  // ---- Named signatures (item 8) ----
+  listSignatures: (companyId) => request(`/companies/${companyId}/signatures`),
+  createSignature: (companyId, name, file) => {
+    const fd = new FormData(); fd.append("name", name); fd.append("file", file);
+    return request(`/companies/${companyId}/signatures`, { method: "POST", body: fd });
+  },
+  updateSignature: (companyId, sigId, body) =>
+    request(`/companies/${companyId}/signatures/${sigId}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  signatureImageUrl: (companyId, sigId) =>
+    `${BASE}/companies/${companyId}/signatures/${sigId}/image`,
+
+  // ---- Numbering (per-company) ----
+  getNumbering: (companyId) => request(`/companies/${companyId}/numbering`),
+  updateNumbering: (companyId, body) =>
+    request(`/companies/${companyId}/numbering`, { method: "PUT", body: JSON.stringify(body) }),
+
+  // ---- Import ----
+  uploadDepot: (companyId, file) => {
     const fd = new FormData();
+    fd.append("company_id", companyId);
     fd.append("file", file);
     return request("/import/depot", { method: "POST", body: fd });
   },
-  uploadChallan: (file) => {
+  uploadChallan: (companyId, file) => {
     const fd = new FormData();
+    fd.append("company_id", companyId);
     fd.append("file", file);
     return request("/import/challan", { method: "POST", body: fd });
   },
   adjustTransaction: (id, body) =>
     request(`/transactions/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  importBatches: () => request("/import/batches"),
+  importBatches: (companyId) => request(`/import/batches?company_id=${companyId}`),
 
-  pendingGroupings: () => request("/certificates/pending"),
-  searchCertificates: (params) =>
-    request(`/certificates?${new URLSearchParams(
-      Object.fromEntries(Object.entries(params).filter(([, v]) => v))
-    )}`),
+  // ---- Certificates ----
+  pendingGroupings: (companyId) => request(`/certificates/pending?company_id=${companyId}`),
+  searchCertificates: (params) => request(`/certificates?${qs(params)}`),
   getCertificate: (id) => request(`/certificates/${id}`),
-  generate: (tin, period) =>
+  generate: (companyId, tin, period, signatureId) =>
     request("/certificates/generate", {
-      method: "POST", body: JSON.stringify({ tin, period }),
+      method: "POST",
+      body: JSON.stringify({ company_id: companyId, tin, period, signature_id: signatureId }),
     }),
   generateBulk: (items) =>
     request("/certificates/generate/bulk", {
@@ -58,7 +110,16 @@ export const api = {
     request(`/certificates/${id}/tin-status`, {
       method: "PATCH", body: JSON.stringify({ has_12_digit_tin: has12DigitTin }),
     }),
+  updateIssueDate: (id, mode, issueDate) =>
+    request(`/certificates/${id}/issue-date`, {
+      method: "PATCH", body: JSON.stringify({ mode, issue_date: issueDate || null }),
+    }),
   anomalies: (id) => request(`/certificates/${id}/anomalies`),
+  anomaliesBulk: (filters) =>
+    request("/certificates/anomalies/bulk", { method: "POST", body: JSON.stringify(filters) }),
+  dispatchBulk: (filters) =>
+    request("/certificates/dispatch/bulk", { method: "POST", body: JSON.stringify(filters) }),
+  exportUrl: (params) => `${BASE}/certificates/export?${qs(params)}`,
   dispatch: (id, payload) =>
     request(`/certificates/${id}/dispatch`, {
       method: "POST", body: JSON.stringify(payload),
@@ -68,6 +129,8 @@ export const api = {
   dispatchJobs: () => request("/dispatch/jobs"),
   pdfUrl: (id) => `${BASE}/certificates/${id}/pdf`,
   whatsappLinks: (id) => request(`/certificates/${id}/whatsapp-links`),
+
+  // ---- Legacy global org settings (SMTP/WhatsApp/dispatch mode stay global) ----
   logoUrl: `${BASE}/settings/org/logo`,
   sealUrl: `${BASE}/settings/org/seal`,
   signatureUrl: `${BASE}/settings/org/signature`,
@@ -81,21 +144,6 @@ export const api = {
     const fd = new FormData(); fd.append("file", file);
     return request("/settings/org/logo", { method: "POST", body: fd });
   },
-  uploadSeal: (file) => {
-    const fd = new FormData(); fd.append("file", file);
-    return request("/settings/org/seal", { method: "POST", body: fd });
-  },
-  uploadSignature: (file) => {
-    const fd = new FormData(); fd.append("file", file);
-    return request("/settings/org/signature", { method: "POST", body: fd });
-  },
-  uploadSealImage: (file) => {
-    const fd = new FormData(); fd.append("file", file);
-    return request("/settings/org/seal-image", { method: "POST", body: fd });
-  },
-  getNumbering: () => request("/settings/numbering"),
-  updateNumbering: (body) =>
-    request("/settings/numbering", { method: "PUT", body: JSON.stringify(body) }),
   resetDatabase: (confirm) =>
     request("/settings/database/reset", {
       method: "POST", body: JSON.stringify({ confirm }),

@@ -62,15 +62,17 @@ class CertificateData:
 
 def build_certificate_data(
     db: Session,
+    company_id: int,
     tin: str,
     period: str,
     default_description: str = "Supply of Goods",
     default_bank: str | None = None,
 ) -> CertificateData | None:
-    """Aggregate all Depot-SCB rows for one (TIN, fiscal-year) group."""
+    """Aggregate all Depot-SCB rows for one (company, TIN, fiscal-year) group."""
     txns: list[Transaction] = (
         db.query(Transaction)
-        .filter(Transaction.tin == tin, Transaction.fiscal_year == period)
+        .filter(Transaction.company_id == company_id, Transaction.tin == tin,
+                Transaction.fiscal_year == period)
         .order_by(Transaction.cheque_date, Transaction.id)   # group/order by date
         .all()
     )
@@ -132,13 +134,15 @@ def build_certificate_data(
     return data
 
 
-def list_groupings(db: Session) -> list[dict]:
-    """All distinct (TIN, period) groupings present in imported data."""
+def list_groupings(db: Session, company_id: int | None = None) -> list[dict]:
+    """All distinct (TIN, period) groupings present in imported data, scoped
+    to one company — or across all companies when company_id is None (used
+    only by the Dashboard's global overview)."""
     from sqlalchemy import func
 
     from ..models.entities import Supplier
 
-    rows = (
+    q = (
         db.query(
             Transaction.tin,
             Transaction.fiscal_year,
@@ -152,9 +156,10 @@ def list_groupings(db: Session) -> list[dict]:
         )
         .outerjoin(Supplier, Transaction.supplier_id == Supplier.id)
         .filter(Transaction.tin.isnot(None), Transaction.fiscal_year.isnot(None))
-        .group_by(Transaction.tin, Transaction.fiscal_year)
-        .all()
     )
+    if company_id is not None:
+        q = q.filter(Transaction.company_id == company_id)
+    rows = q.group_by(Transaction.tin, Transaction.fiscal_year).all()
     return [
         {
             "tin": r[0], "period": r[1], "supplier_name": r[2],

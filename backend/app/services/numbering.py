@@ -10,10 +10,14 @@ from sqlalchemy.orm import Session
 from ..models.entities import NumberingConfig, NumberSequence
 
 
-def get_numbering_config(db: Session) -> NumberingConfig:
-    cfg = db.get(NumberingConfig, 1)
+def get_numbering_config(db: Session, company_id: int) -> NumberingConfig:
+    """One config row per company, lazily created (and seeded with that
+    company's name as the initial {CompanyName} token) on first access."""
+    cfg = db.query(NumberingConfig).filter(NumberingConfig.company_id == company_id).first()
     if not cfg:
-        cfg = NumberingConfig(id=1)
+        from .certificate_generator import get_company
+        company = get_company(db, company_id)
+        cfg = NumberingConfig(company_id=company_id, company_token=company.name)
         db.add(cfg)
         db.flush()
     return cfg
@@ -29,19 +33,22 @@ def _format_fiscal_year(period: str, fmt: str) -> str:
     return f"{start}-{end2}"  # default YYYY-YY
 
 
-def allocate_certificate_number(db: Session, period: str) -> str:
-    """Allocate the next number atomically.
+def allocate_certificate_number(db: Session, company_id: int, period: str) -> str:
+    """Allocate the next number atomically, scoped to one company.
 
     Implementation: idempotent seed insert (ON CONFLICT DO NOTHING) followed
     by a single atomic ``UPDATE ... SET last_value = last_value + 1
     RETURNING last_value``. The UPDATE takes a row-level lock on PostgreSQL
     and the database write lock on SQLite, so concurrent allocators are
     serialized and can never receive the same number on either backend.
+    Two companies' sequences are fully independent (company_id is baked into
+    the scope string), so they never collide even with identical settings.
     """
     from sqlalchemy import text
 
-    cfg = get_numbering_config(db)
-    scope = period if cfg.reset_policy == "per_fiscal_year" else "global"
+    cfg = get_numbering_config(db, company_id)
+    period_or_global = period if cfg.reset_policy == "per_fiscal_year" else "global"
+    scope = f"c{company_id}:{period_or_global}"
 
     db.execute(
         text(

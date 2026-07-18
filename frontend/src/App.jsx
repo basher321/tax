@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard.jsx";
 import Settings from "./pages/Settings.jsx";
 import Import from "./pages/Import.jsx";
 import CertificateIssue from "./pages/CertificateIssue.jsx";
+import { useCompany } from "./context/CompanyContext.jsx";
 
 // The sidebar contains EXACTLY these four items — per spec, no additions.
 const NAV = [
@@ -35,6 +36,7 @@ const PAGE_TITLES = {
 export default function App() {
   const location = useLocation();
   const page = PAGE_TITLES[location.pathname] || PAGE_TITLES["/dashboard"];
+  const { companies, companyId, setCompanyId, loading: companiesLoading } = useCompany();
 
   useEffect(() => {
     const state = window.history.state || {};
@@ -123,9 +125,25 @@ export default function App() {
               <h1 className="mt-1 text-2xl font-semibold">{page.title}</h1>
               <p className="mt-1 text-sm text-ink/60">{page.description}</p>
             </div>
-            <div className="rounded border border-rule bg-white px-3 py-2 text-right text-xs text-ink/60 shadow-sm">
-              <span className="block font-medium text-ink">System ready</span>
-              PostgreSQL connected
+            <div className="flex items-center gap-3">
+              {!companiesLoading && companies.length > 0 && (
+                <div className="text-right">
+                  <span className="block text-[11px] uppercase tracking-wide text-ink/45">Company</span>
+                  <select
+                    className="input !py-1.5 !w-56"
+                    value={companyId ?? ""}
+                    onChange={(e) => setCompanyId(Number(e.target.value))}
+                  >
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="rounded border border-rule bg-white px-3 py-2 text-right text-xs text-ink/60 shadow-sm">
+                <span className="block font-medium text-ink">System ready</span>
+                PostgreSQL connected
+              </div>
             </div>
           </div>
         </header>

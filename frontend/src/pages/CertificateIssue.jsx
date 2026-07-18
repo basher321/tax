@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client.js";
+import { useCompany } from "../context/CompanyContext.jsx";
 
 const fmt = (n) => (n == null ? "" : Number(n).toLocaleString());
 
@@ -45,6 +46,10 @@ function Preview({ certId, onClose }) {
   const [notice, setNotice] = useState(null);
   const [noticeKind, setNoticeKind] = useState("ok");
   const [emailBusy, setEmailBusy] = useState(false);
+  const [dateMode, setDateMode] = useState("auto");
+  const [manualDate, setManualDate] = useState("");
+  const [headerOk, setHeaderOk] = useState(true);
+  const [footerOk, setFooterOk] = useState(true);
 
   const showNotice = (message, kind = "ok") => {
     setNotice(message);
@@ -67,7 +72,11 @@ function Preview({ certId, onClose }) {
       api.whatsappLinks(certId).catch(() => null),
       refreshEmailStatus(),
     ]).then(
-      ([c, a, wa]) => { setCert(c); setRemarks(c.remarks || ""); setAnomalies(a); setWaLinks(wa); }
+      ([c, a, wa]) => {
+        setCert(c); setRemarks(c.remarks || ""); setAnomalies(a); setWaLinks(wa);
+        setDateMode(c.issue_date_mode || "auto");
+        setManualDate(c.issue_date || "");
+      }
     );
   useEffect(() => { load(); }, [certId]);
 
@@ -81,6 +90,17 @@ function Preview({ certId, onClose }) {
     const c = await api.updateTinStatus(certId, has12DigitTin);
     setCert(c);
     showNotice("TIN status saved - PDF re-rendered.");
+  }
+
+  async function saveIssueDate() {
+    if (dateMode === "manual" && !manualDate) {
+      showNotice("Pick a date for Manual mode before saving.", "warn");
+      return;
+    }
+    const c = await api.updateIssueDate(certId, dateMode, dateMode === "manual" ? manualDate : null);
+    setCert(c);
+    setManualDate(c.issue_date || "");
+    showNotice("Issue date saved - PDF re-rendered.");
   }
 
   async function sendEmail() {
@@ -232,8 +252,15 @@ function Preview({ certId, onClose }) {
         )}
 
         {/* Fixed certificate layout - mirrors certificate_format.jpeg.
-            Everything is read-only; ONLY Remarks below is editable. */}
+            Everything is read-only except Remarks and the date-mode below. */}
         <div className="p-6 text-sm">
+          {headerOk && (
+            <img
+              src={api.letterheadHeaderUrl(cert.company_id)}
+              alt="" className="w-full mb-3 object-contain"
+              onError={() => setHeaderOk(false)}
+            />
+          )}
           <h2 className="text-center font-semibold text-base">Certificate of Deduction of Tax</h2>
           <p className="text-center text-xs">[Section 145 of the Income Tax Act 2023]</p>
 
@@ -334,14 +361,44 @@ function Preview({ certId, onClose }) {
           <p className="mt-3"><span className="font-medium">Amount In word:</span> {cert.amount_in_words}</p>
           <p className="text-ink/70">Certified that the information given above is correct and complete.</p>
 
-          {/* the ONLY editable field */}
+          {/* Editable fields: Remarks (Text Editable in the template) and the
+              issue-date mode (Automatic vs. Manual), both saved before Send. */}
           <div className="mt-4">
-            <label className="label">Remarks (the only editable field)</label>
+            <label className="label">Remarks (the only editable table field)</label>
             <div className="flex gap-2">
               <input className="input" value={remarks} onChange={(e) => setRemarks(e.target.value)} />
               <button className="btn-primary" onClick={saveRemarks}>Save remarks</button>
             </div>
           </div>
+
+          <div className="mt-4">
+            <label className="label">Issue date</label>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="dateMode" checked={dateMode === "auto"}
+                  onChange={() => setDateMode("auto")} />
+                Automatic (today)
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="dateMode" checked={dateMode === "manual"}
+                  onChange={() => setDateMode("manual")} />
+                Manual
+              </label>
+              {dateMode === "manual" && (
+                <input type="date" className="input !w-auto" value={manualDate}
+                  onChange={(e) => setManualDate(e.target.value)} />
+              )}
+              <button className="btn-ghost" onClick={saveIssueDate}>Save date</button>
+            </div>
+          </div>
+
+          {footerOk && (
+            <img
+              src={api.letterheadFooterUrl(cert.company_id)}
+              alt="" className="w-full mt-4 object-contain"
+              onError={() => setFooterOk(false)}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -378,7 +435,7 @@ function validateVendorField(key, value) {
   return null;
 }
 
-function VendorOnboardingModal({ onClose, onCreated }) {
+function VendorOnboardingModal({ companyId, onClose, onCreated }) {
   const [form, setForm] = useState({ name: "", address: "", tin: "", bin: "", email: "", whatsapp: "" });
   const [touched, setTouched] = useState({});
   const [busy, setBusy] = useState(false);
@@ -399,7 +456,7 @@ function VendorOnboardingModal({ onClose, onCreated }) {
     setBusy(true);
     setServerError(null);
     try {
-      const supplier = await api.createSupplier(form);
+      const supplier = await api.createSupplier({ ...form, company_id: companyId });
       onCreated(supplier);
     } catch (err) {
       setServerError(err.message);
@@ -443,9 +500,64 @@ function VendorOnboardingModal({ onClose, onCreated }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Bulk anomaly check + bulk send results panels (items 5 & 10)        */
+/* ------------------------------------------------------------------ */
+function BulkAnomalyPanel({ results, onClose }) {
+  return (
+    <div className="card border-red-300 bg-red-50/40">
+      <div className="px-5 py-3 border-b border-red-200 flex items-center">
+        <h2 className="font-medium text-red-800 mr-auto">
+          Bulk anomaly check — {results.length} certificate(s) need attention
+        </h2>
+        <button className="btn-ghost !py-0.5" onClick={onClose}>Dismiss</button>
+      </div>
+      {results.length === 0 ? (
+        <p className="p-5 text-sm text-ledger">No anomalies found across the matching certificates.</p>
+      ) : (
+        <ul className="divide-y divide-red-200/70 text-sm">
+          {results.map((r) => (
+            <li key={r.certificate_id} className="px-5 py-2.5">
+              <div className="font-medium">{r.supplier_name} <span className="font-mono text-ink/50">{r.certificate_no}</span></div>
+              <ul className="list-disc ml-5 text-red-800">
+                {r.anomalies.map((a, i) => (
+                  <li key={i}><span className="font-mono text-xs">{a.code}</span> - {a.message}</li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function BulkSendPanel({ results, onClose }) {
+  const ok = results.filter((r) => r.ok).length;
+  return (
+    <div className="card">
+      <div className="px-5 py-3 border-b border-rule flex items-center">
+        <h2 className="font-medium mr-auto">Bulk send summary — {ok} sent, {results.length - ok} skipped</h2>
+        <button className="btn-ghost !py-0.5" onClick={onClose}>Dismiss</button>
+      </div>
+      <ul className="divide-y divide-rule/60 text-sm">
+        {results.map((r) => (
+          <li key={r.certificate_id} className="px-5 py-2 flex items-center gap-2">
+            <span className={r.ok ? "text-ledger" : "text-red-700"}>{r.ok ? "Sent" : "Skipped"}</span>
+            <span className="font-mono text-ink/50">{r.certificate_no}</span>
+            <span>{r.supplier_name}</span>
+            {r.error && <span className="text-ink/50 text-xs ml-auto">{r.error}</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Main screen: search/filter + pending groupings + generated list     */
 /* ------------------------------------------------------------------ */
 export default function CertificateIssue() {
+  const { companyId } = useCompany();
   const [filters, setFilters] = useState({ tin: "", bin: "", supplier_name: "", date_from: "", date_to: "" });
   const [page, setPage] = useState(1);
   const [results, setResults] = useState({ items: [], total: 0 });
@@ -454,13 +566,32 @@ export default function CertificateIssue() {
   const [previewId, setPreviewId] = useState(null);
   const [notice, setNotice] = useState(null);
   const [showVendorModal, setShowVendorModal] = useState(false);
+  const [signatures, setSignatures] = useState([]);
+  const [signatureId, setSignatureId] = useState("");
+  const [bulkAnomalies, setBulkAnomalies] = useState(null);
+  const [bulkChecking, setBulkChecking] = useState(false);
+  const [bulkSendResults, setBulkSendResults] = useState(null);
+  const [bulkSending, setBulkSending] = useState(false);
 
-  const search = (nextPage = page) =>
-    api.searchCertificates({ ...filters, page: nextPage, page_size: 20 }).then(setResults);
-  const loadPending = () => api.pendingGroupings().then(setPending);
+  const search = (nextPage = page) => {
+    if (!companyId) return Promise.resolve();
+    return api.searchCertificates({ ...filters, company_id: companyId, page: nextPage, page_size: 20 }).then(setResults);
+  };
+  const loadPending = () => {
+    if (!companyId) return Promise.resolve();
+    return api.pendingGroupings(companyId).then(setPending);
+  };
 
-  useEffect(() => { search(); }, [page]);
-  useEffect(() => { loadPending(); }, []);
+  useEffect(() => { search(); }, [page, companyId]);
+  useEffect(() => { loadPending(); }, [companyId]);
+  useEffect(() => {
+    if (!companyId) { setSignatures([]); return; }
+    api.listSignatures(companyId).then((list) => {
+      setSignatures(list);
+      const def = list.find((s) => s.is_default);
+      setSignatureId(def ? String(def.id) : "");
+    });
+  }, [companyId]);
 
   const filteredPending = useMemo(() => {
     const tin = filters.tin.trim().toLowerCase();
@@ -483,11 +614,13 @@ export default function CertificateIssue() {
   function applyFilters() {
     setPage(1);
     search(1);
+    setBulkAnomalies(null);
+    setBulkSendResults(null);
   }
 
   async function generateOne(g) {
     try {
-      const c = await api.generate(g.tin, g.period);
+      const c = await api.generate(companyId, g.tin, g.period, signatureId ? Number(signatureId) : undefined);
       setNotice(`Generated ${c.certificate_no} for ${g.supplier_name}`);
       await Promise.all([search(), loadPending()]);
       setPreviewId(c.id);
@@ -496,7 +629,10 @@ export default function CertificateIssue() {
 
   async function generateBulk() {
     const items = filteredPending.filter((g) => checked[`${g.tin}|${g.period}`])
-      .map((g) => ({ tin: g.tin, period: g.period }));
+      .map((g) => ({
+        company_id: companyId, tin: g.tin, period: g.period,
+        signature_id: signatureId ? Number(signatureId) : undefined,
+      }));
     if (!items.length) return;
     const res = await api.generateBulk(items);
     const ok = res.filter((r) => r.ok).length;
@@ -505,15 +641,69 @@ export default function CertificateIssue() {
     await Promise.all([search(), loadPending()]);
   }
 
+  async function runBulkCheck() {
+    setBulkChecking(true);
+    setBulkSendResults(null);
+    try {
+      const res = await api.anomaliesBulk({ ...filters, company_id: companyId });
+      setBulkAnomalies(res);
+    } catch (e) {
+      setNotice(e.message);
+    } finally {
+      setBulkChecking(false);
+    }
+  }
+
+  async function runBulkSend() {
+    setBulkSending(true);
+    setBulkAnomalies(null);
+    try {
+      const res = await api.dispatchBulk({ ...filters, company_id: companyId, channel: "email" });
+      setBulkSendResults(res);
+      await search();
+    } catch (e) {
+      setNotice(e.message);
+    } finally {
+      setBulkSending(false);
+    }
+  }
+
+  function exportFiltered() {
+    window.open(api.exportUrl({ ...filters, company_id: companyId }), "_blank", "noopener");
+  }
+
+  function exportOne(certId) {
+    window.open(api.exportUrl({ company_id: companyId, certificate_id: certId }), "_blank", "noopener");
+  }
+
   const set = (k) => (e) => setFilters({ ...filters, [k]: e.target.value });
   const submitOnEnter = (e) => {
     if (e.key === "Enter") applyFilters();
   };
 
+  if (!companyId) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-xl font-semibold">Certificate Issue</h1>
+        <p className="text-sm text-ink/60">Select a company from the header above to continue.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center">
+      <div className="flex items-center gap-3">
         <h1 className="text-xl font-semibold mr-auto">Certificate Issue</h1>
+        {signatures.length > 0 && (
+          <div className="flex items-center gap-2 text-sm">
+            <span className="label !mb-0">Signature</span>
+            <select className="input !py-1.5 !w-48" value={signatureId} onChange={(e) => setSignatureId(e.target.value)}>
+              {signatures.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}{s.is_default ? " (default)" : ""}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <button className="btn-primary" onClick={() => setShowVendorModal(true)}>+ Add Vendor</button>
       </div>
       {notice && <p className="text-sm text-ledger">{notice}</p>}
@@ -574,8 +764,15 @@ export default function CertificateIssue() {
 
       {/* Generated certificates */}
       <div className="card">
-        <div className="px-5 py-3 border-b border-rule">
-          <h2 className="font-medium">Generated certificates <span className="text-ink/40 font-normal">({results.total})</span></h2>
+        <div className="px-5 py-3 border-b border-rule flex items-center gap-2">
+          <h2 className="font-medium mr-auto">Generated certificates <span className="text-ink/40 font-normal">({results.total})</span></h2>
+          <button className="btn-ghost !py-0.5" onClick={exportFiltered}>Export filtered</button>
+          <button className="btn-ghost !py-0.5" onClick={runBulkCheck} disabled={bulkChecking}>
+            {bulkChecking ? "Checking..." : "Check all"}
+          </button>
+          <button className="btn-primary !py-0.5" onClick={runBulkSend} disabled={bulkSending}>
+            {bulkSending ? "Sending..." : "Send all"}
+          </button>
         </div>
         <table className="w-full text-sm">
           <thead>
@@ -594,7 +791,8 @@ export default function CertificateIssue() {
                 <td>{c.issue_date}</td>
                 <td className="text-right font-mono">{fmt(c.total_tax_deducted)}</td>
                 <td><span className={`text-xs px-1.5 py-0.5 rounded ${c.status === "sent" ? "bg-ledger/10 text-ledger" : "bg-paper"}`}>{c.status}</span></td>
-                <td className="pr-4 text-right">
+                <td className="pr-4 text-right whitespace-nowrap">
+                  <button className="btn-ghost !py-0.5" onClick={() => exportOne(c.id)}>Export</button>
                   <button className="btn-ghost !py-0.5" onClick={() => setPreviewId(c.id)}>Preview / send</button>
                 </td>
               </tr>
@@ -611,9 +809,13 @@ export default function CertificateIssue() {
         </div>
       </div>
 
+      {bulkAnomalies && <BulkAnomalyPanel results={bulkAnomalies} onClose={() => setBulkAnomalies(null)} />}
+      {bulkSendResults && <BulkSendPanel results={bulkSendResults} onClose={() => setBulkSendResults(null)} />}
+
       {previewId && <Preview certId={previewId} onClose={() => { setPreviewId(null); search(); }} />}
       {showVendorModal && (
         <VendorOnboardingModal
+          companyId={companyId}
           onClose={() => setShowVendorModal(false)}
           onCreated={(supplier) => {
             setShowVendorModal(false);

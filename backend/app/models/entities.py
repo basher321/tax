@@ -39,11 +39,60 @@ class PartyType(str, enum.Enum):
     OTHER = "other"
 
 
-class Supplier(Base):
-    __tablename__ = "tds_suppliers"
+class Company(Base):
+    """A legal entity issuing certificates. Owns identity, seal, letterhead,
+    numbering, and named signatures — everything except SMTP/WhatsApp
+    transport config, which stays global on OrgSettings."""
+
+    __tablename__ = "tds_companies"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    tin: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True)
+    address: Mapped[str | None] = mapped_column(Text)
+    logo_path: Mapped[str | None] = mapped_column(String(512))
+    seal_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha
+    letterhead_header_path: Mapped[str | None] = mapped_column(String(512))
+    letterhead_footer_path: Mapped[str | None] = mapped_column(String(512))
+    officer_name: Mapped[str | None] = mapped_column(String(255))
+    officer_designation: Mapped[str | None] = mapped_column(String(255))
+    officer_email: Mapped[str | None] = mapped_column(String(255))
+    default_bank_name: Mapped[str | None] = mapped_column(String(255))
+    default_description: Mapped[str | None] = mapped_column(
+        String(255), default="Supply of Goods"
+    )
+    # The company auto-selected in the UI / used to backfill pre-existing data.
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    signatures: Mapped[list["Signature"]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
+
+
+class Signature(Base):
+    """A named signature image (e.g. one per signatory/designation), scoped
+    to a company. The user picks one at certificate-generation time."""
+
+    __tablename__ = "tds_signatures"
+    __table_args__ = (UniqueConstraint("company_id", "name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("tds_companies.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    image_path: Mapped[str] = mapped_column(String(512))
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    company: Mapped[Company] = relationship(back_populates="signatures")
+
+
+class Supplier(Base):
+    __tablename__ = "tds_suppliers"
+    __table_args__ = (UniqueConstraint("company_id", "tin", name="uq_supplier_company_tin"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("tds_companies.id"), index=True)
+    tin: Mapped[str] = mapped_column(String(20), index=True)
     # BIN is not present in the source sheet; first-class + manually editable.
     bin: Mapped[str | None] = mapped_column(String(20), index=True)
     name: Mapped[str] = mapped_column(String(255), index=True)
@@ -85,6 +134,7 @@ class ImportBatch(Base):
     __tablename__ = "tds_import_batches"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("tds_companies.id"), index=True)
     filename: Mapped[str] = mapped_column(String(255))
     kind: Mapped[str] = mapped_column(String(20), default="depot")  # depot | challan
     total_rows: Mapped[int] = mapped_column(Integer, default=0)
@@ -118,6 +168,7 @@ class Transaction(Base):
     __tablename__ = "tds_transactions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("tds_companies.id"), index=True)
     batch_id: Mapped[int | None] = mapped_column(ForeignKey("tds_import_batches.id"))
     supplier_id: Mapped[int | None] = mapped_column(
         ForeignKey("tds_suppliers.id"), index=True
@@ -135,6 +186,8 @@ class Transaction(Base):
     description_of_payment: Mapped[str | None] = mapped_column(String(255))
     sum_of_bill_amount: Mapped[float | None] = mapped_column(Float)
     sum_of_tds: Mapped[float | None] = mapped_column(Float)
+    # Legacy column — no longer populated by import/challan upload (VDS is
+    # excluded from the pipeline); kept only so old rows keep their data.
     sum_of_vds: Mapped[float | None] = mapped_column(Float)
     match: Mapped[str | None] = mapped_column(String(64))
     section: Mapped[str | None] = mapped_column(String(32), index=True)
@@ -162,11 +215,18 @@ class CertStatus(str, enum.Enum):
 
 class Certificate(Base):
     __tablename__ = "tds_certificates"
-    __table_args__ = (UniqueConstraint("tin", "period", name="uq_cert_tin_period"),)
+    __table_args__ = (
+        UniqueConstraint("company_id", "tin", "period", name="uq_cert_company_tin_period"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("tds_companies.id"), index=True)
     certificate_no: Mapped[str | None] = mapped_column(String(64), unique=True)
     supplier_id: Mapped[int] = mapped_column(ForeignKey("tds_suppliers.id"))
+    # Signature applied to this certificate, chosen at generation time.
+    # Nullable: falls back to the company's default signature, then to the
+    # legacy OrgSettings.signature_path (see pdf_renderer.py).
+    signature_id: Mapped[int | None] = mapped_column(ForeignKey("tds_signatures.id"))
     tin: Mapped[str] = mapped_column(String(20), index=True)
     period: Mapped[str] = mapped_column(String(9), index=True)  # fiscal year
     period_from: Mapped[date | None] = mapped_column(Date)
@@ -181,9 +241,14 @@ class Certificate(Base):
     has_12_digit_tin: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[CertStatus] = mapped_column(Enum(CertStatus), default=CertStatus.GENERATED)
     issue_date: Mapped[date] = mapped_column(Date, default=date.today)
+    # "auto" re-applies today's date whenever the certificate is (re)saved;
+    # "manual" keeps whatever issue_date was explicitly set in the preview.
+    issue_date_mode: Mapped[str] = mapped_column(String(10), default="auto")
     pdf_path: Mapped[str | None] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
+    company: Mapped[Company] = relationship()
+    signature: Mapped[Signature | None] = relationship()
     supplier: Mapped[Supplier] = relationship()
     lines: Mapped[list["CertificateLine"]] = relationship(
         back_populates="certificate", cascade="all, delete-orphan",
@@ -272,11 +337,16 @@ class OrgSettings(Base):
 
 
 class NumberingConfig(Base):
-    """Admin-configurable certificate numbering (single row, id=1)."""
+    """Admin-configurable certificate numbering. One row per company."""
 
     __tablename__ = "tds_numbering_config"
 
-    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey("tds_companies.id"), unique=True, index=True
+    )
+    # Free-text token substituted for {CompanyName} — decoupled from
+    # Company.name so the admin can keep a short form (e.g. "Renata PLC").
     company_token: Mapped[str] = mapped_column(String(64), default="COMPANY")
     fiscal_year_format: Mapped[str] = mapped_column(String(16), default="YYYY-YY")
     pad_width: Mapped[int] = mapped_column(Integer, default=1)

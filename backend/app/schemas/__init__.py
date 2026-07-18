@@ -42,6 +42,7 @@ class SupplierCreate(BaseModel):
     """Vendor onboarding: all six fields are mandatory and validated here as
     well as client-side — the client check alone never protects the API."""
 
+    company_id: int
     name: str
     address: str
     tin: str
@@ -129,6 +130,8 @@ class ChallanLineOut(ORM):
 
 class CertificateOut(ORM):
     id: int
+    company_id: int
+    signature_id: int | None
     certificate_no: str | None
     tin: str
     period: str
@@ -141,6 +144,7 @@ class CertificateOut(ORM):
     has_12_digit_tin: bool
     status: str
     issue_date: date
+    issue_date_mode: str
     supplier: SupplierOut
 
 
@@ -162,12 +166,28 @@ class DatabaseResetRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    company_id: int
     tin: str
     period: str
+    signature_id: int | None = None  # defaults to the company's default signature
 
 
 class BulkGenerateRequest(BaseModel):
     items: list[GenerateRequest]
+
+
+class IssueDateUpdate(BaseModel):
+    """Item 4: preview lets the user pick automatic (today) or manual date."""
+
+    mode: str  # "auto" | "manual"
+    issue_date: date | None = None  # required when mode == "manual"
+
+    @field_validator("mode")
+    @classmethod
+    def _valid_mode(cls, v: str) -> str:
+        if v not in ("auto", "manual"):
+            raise ValueError("mode must be 'auto' or 'manual'")
+        return v
 
 
 class DispatchRequest(BaseModel):
@@ -180,6 +200,98 @@ class DispatchRequest(BaseModel):
 class AnomalyOut(BaseModel):
     code: str
     message: str
+
+
+class CompanyOut(ORM):
+    id: int
+    name: str
+    address: str | None
+    logo_path: str | None
+    seal_path: str | None
+    letterhead_header_path: str | None
+    letterhead_footer_path: str | None
+    officer_name: str | None
+    officer_designation: str | None
+    officer_email: str | None
+    default_bank_name: str | None
+    default_description: str | None
+    is_default: bool
+
+
+class CompanyCreate(BaseModel):
+    name: str
+    address: str | None = None
+    officer_name: str | None = None
+    officer_designation: str | None = None
+    officer_email: str | None = None
+    default_bank_name: str | None = None
+    default_description: str | None = None
+    is_default: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Company name is required")
+        return v
+
+
+class CompanyUpdate(BaseModel):
+    name: str | None = None
+    address: str | None = None
+    officer_name: str | None = None
+    officer_designation: str | None = None
+    officer_email: str | None = None
+    default_bank_name: str | None = None
+    default_description: str | None = None
+    is_default: bool | None = None
+
+
+class SignatureOut(ORM):
+    id: int
+    company_id: int
+    name: str
+    image_path: str
+    is_default: bool
+
+
+class SignatureUpdate(BaseModel):
+    name: str | None = None
+    is_default: bool | None = None
+
+
+class BulkFilterRequest(BaseModel):
+    """Shared filter shape for the bulk anomaly check (item 5) and bulk send
+    (item 10) — mirrors the query params of GET /certificates."""
+
+    company_id: int
+    tin: str | None = None
+    bin: str | None = None
+    supplier_name: str | None = None
+    date_from: date | None = None
+    date_to: date | None = None
+    status: str | None = None
+
+
+class BulkAnomalyOut(BaseModel):
+    certificate_id: int
+    certificate_no: str | None
+    supplier_name: str
+    anomalies: list[AnomalyOut]
+
+
+class BulkDispatchRequest(BulkFilterRequest):
+    channel: str = "email"
+
+
+class BulkDispatchResultOut(BaseModel):
+    certificate_id: int
+    certificate_no: str | None
+    supplier_name: str
+    ok: bool
+    status: str | None = None
+    error: str | None = None
 
 
 class OrgSettingsIn(BaseModel):
@@ -226,12 +338,12 @@ class TransactionOut(ORM):
     total_challan_amount: float | None
     sum_of_bill_amount: float | None
     sum_of_tds: float | None
-    sum_of_vds: float | None
 
 
 class TransactionAdjust(BaseModel):
     """Manual override of auto-filled challan/amount fields after a challan
-    upload. All fields optional — only supplied ones are updated."""
+    upload. All fields optional — only supplied ones are updated. VDS is
+    intentionally excluded from this pipeline."""
 
     challan_no: str | None = None
     challan_date: date | None = None
@@ -239,7 +351,6 @@ class TransactionAdjust(BaseModel):
     section: str | None = None
     sum_of_bill_amount: float | None = None
     sum_of_tds: float | None = None
-    sum_of_vds: float | None = None
 
 
 class RateUpdateIn(BaseModel):

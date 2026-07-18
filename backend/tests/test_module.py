@@ -1,5 +1,7 @@
-"""Tests: Excel import parsing, aggregation math against a known sample,
-concurrent number allocation, anomaly detection, and offline dispatch queue."""
+"""Tests: Excel import parsing (incl. Base Amount x TDS Rate + VDS exclusion),
+aggregation math, concurrent number allocation, anomaly detection, bulk
+anomaly check / bulk send, per-company letterhead resolution, multi-company
+isolation, and offline dispatch queue."""
 import os
 import smtplib
 import threading
@@ -14,10 +16,16 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401 — register tables
-from app.api.routes import adjust_transaction, onboard_supplier
+from app.api.routes import (
+    adjust_transaction,
+    bulk_anomaly_check,
+    bulk_dispatch,
+    onboard_supplier,
+)
 from app.database import Base
 from app.models.entities import (
     Certificate,
+    Company,
     ContactKind,
     DispatchChannel,
     DispatchStatus,
@@ -28,7 +36,7 @@ from app.models.entities import (
     TaxRate,
     Transaction,
 )
-from app.schemas import SupplierCreate, TransactionAdjust
+from app.schemas import BulkDispatchRequest, BulkFilterRequest, SupplierCreate, TransactionAdjust
 from app.services import rate_hook
 from app.services.aggregation import build_certificate_data
 from app.services.amount_in_words import amount_in_words
@@ -47,12 +55,14 @@ from app.services.excel_import import (
     parse_month_label,
 )
 from app.services.numbering import allocate_certificate_number, get_numbering_config
+from app.services.pdf_renderer import render_certificate_pdf
 from app.services.validation import check_certificate
 
 HEADERS = [
     "Category", "Cheque Date", "Cheque Number", "Supplier Name",
     "Supplier Address", "Bank Name", "WhatsApp No.", "Email", "Depot Code",
     "Description of Payment", "Sum of Bill Amount", "Sum of TDS", "Sum of VDS",
+    "Base Amount", "TDS Rate",
     "Match", "Section", "TIN", "Challan No", "Challan Date",
     "Cheque/Challan SL", "Month", "Total Challan Amount", "Remarks",
 ]
@@ -71,6 +81,22 @@ def db(tmp_path):
 
 
 @pytest.fixture
+def company(db):
+    c = Company(name="Renata PLC", is_default=True)
+    db.add(c)
+    db.commit()
+    return c
+
+
+@pytest.fixture
+def company2(db):
+    c = Company(name="Second Co")
+    db.add(c)
+    db.commit()
+    return c
+
+
+@pytest.fixture
 def sample_xlsx(tmp_path):
     """Known sample: 3 rows for TIN A (Dec'25), 1 bad row, 1 row for TIN B."""
     wb = Workbook()
@@ -82,9 +108,10 @@ def sample_xlsx(tmp_path):
 
     def row(name, tin, bill, tds, month, cheque=date(2025, 12, 1),
             section="89", challan="2526-001", chdate="15/01/2026",
-            total_ch=100000, email=None, wa=None):
+            total_ch=100000, email=None, wa=None, base_amount=None, tds_rate=None):
         ws.append(["Depot", cheque, "CHQ1", name, None, None, wa, email, None,
-                   None, bill, tds, -bill * 0.05 if bill else None, None,
+                   None, bill, tds, -bill * 0.05 if bill else None,
+                   base_amount, tds_rate, None,
                    section, tin, challan, chdate, 1, month, total_ch, None])
 
     row("Alpha Traders", "111122223333", 100000, 5000, "December'25")
@@ -102,18 +129,46 @@ def sample_xlsx(tmp_path):
 
 
 # ------------------------------------------------------------- Import -------
-def test_import_parses_and_validates(db, sample_xlsx):
-    batch = import_depot_workbook(db, sample_xlsx, "sample.xlsx")
+def test_import_parses_and_validates(db, company, sample_xlsx):
+    batch = import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    assert batch.company_id == company.id
     assert batch.total_rows == 5
     assert batch.ok_rows == 4
     assert batch.error_rows == 1
     msgs = [e.message for e in batch.errors]
     assert any("not a valid 12-digit TIN" in m for m in msgs)
-    # All 21 source fields land on the transaction row.
+    # All fields land on the transaction row.
     t = db.query(Transaction).filter_by(tin="111122223333").first()
+    assert t.company_id == company.id
     assert t.category == "Depot" and t.section == "89"
     assert t.challan_no == "2526-001" and t.challan_date == date(2026, 1, 15)
     assert t.month == "December'25" and t.fiscal_year == "2025-26"
+
+
+def test_vds_never_populated_by_import(db, company, sample_xlsx):
+    """Sum of VDS is present in the sheet but must never be written (item 2)."""
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    txns = db.query(Transaction).filter_by(tin="111122223333").all()
+    assert txns and all(t.sum_of_vds is None for t in txns)
+
+
+def test_base_amount_times_tds_rate_overrides_sum_of_tds(db, company, tmp_path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Depot-SCB"
+    ws.append(HEADERS)
+    # Sum of TDS says 999 (should be ignored) because Base Amount x TDS Rate is present.
+    ws.append(["Depot", date(2025, 12, 1), "CHQ9", "Gamma Traders", None, None,
+               None, None, None, None, 100000, 999, None,
+               50000, 0.1,  # Base Amount x TDS Rate = 5000
+               None, "89", "999900001111", "2526-777", "15/01/2026",
+               1, "December'25", 100000, None])
+    path = tmp_path / "base_rate.xlsx"
+    wb.save(path)
+
+    import_depot_workbook(db, str(path), "base_rate.xlsx", company.id)
+    t = db.query(Transaction).filter_by(tin="999900001111").first()
+    assert t.sum_of_tds == 5000  # 50000 * 0.1, not the literal 999
 
 
 def test_month_and_fiscal_year_parsing():
@@ -124,9 +179,9 @@ def test_month_and_fiscal_year_parsing():
 
 
 # -------------------------------------------------------- Aggregation -------
-def test_aggregation_math_known_sample(db, sample_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    data = build_certificate_data(db, "111122223333", "2025-26")
+def test_aggregation_math_known_sample(db, company, sample_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    data = build_certificate_data(db, company.id, "111122223333", "2025-26")
     # SUM logic: 100000+50000+20000 payment; 5000+2500+1000 TDS.
     assert data.total_payment == 170000
     assert data.total_tax_deducted == 8500
@@ -142,20 +197,50 @@ def test_amount_in_words_matches_template_style():
 
 
 # ------------------------------------------------- Generation rules ---------
-def test_supplier_only_enforced_at_service(db, sample_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
+def test_supplier_only_enforced_at_service(db, company, sample_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
     sup = db.query(Supplier).filter_by(tin="111122223333").first()
     sup.party_type = PartyType.EMPLOYEE
     db.commit()
     with pytest.raises(GenerationError, match="supplier-only"):
-        generate_certificate(db, "111122223333", "2025-26")
+        generate_certificate(db, company.id, "111122223333", "2025-26")
 
 
-def test_duplicate_certificate_blocked(db, sample_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    generate_certificate(db, "444455556666", "2025-26")
+def test_duplicate_certificate_blocked(db, company, sample_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    generate_certificate(db, company.id, "444455556666", "2025-26")
     with pytest.raises(GenerationError, match="already exists"):
-        generate_certificate(db, "444455556666", "2025-26")
+        generate_certificate(db, company.id, "444455556666", "2025-26")
+
+
+# ------------------------------------------- Multi-company isolation --------
+def test_two_companies_same_tin_isolated(db, company, company2, sample_xlsx):
+    """The same TIN can independently onboard/transact/generate under two
+    different companies without colliding (full multi-tenant scope)."""
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company2.id)
+
+    suppliers = db.query(Supplier).filter_by(tin="111122223333").all()
+    assert len(suppliers) == 2
+    assert {s.company_id for s in suppliers} == {company.id, company2.id}
+
+    cert1 = generate_certificate(db, company.id, "444455556666", "2025-26")
+    cert2 = generate_certificate(db, company2.id, "444455556666", "2025-26")
+    assert cert1.id != cert2.id
+    assert cert1.certificate_no != cert2.certificate_no  # independent sequences
+
+
+def test_supplier_onboarding_upserts_per_company_not_globally(db, company, company2):
+    body1 = SupplierCreate(company_id=company.id, name="Gamma", address="Dhaka",
+                           tin="555566667777", bin="B1", email="a@b.com",
+                           whatsapp="+8801711111111")
+    body2 = SupplierCreate(company_id=company2.id, name="Gamma Co2", address="Ctg",
+                           tin="555566667777", bin="B2", email="c@d.com",
+                           whatsapp="+8801711112222")
+    sup1 = onboard_supplier(body1, db)
+    sup2 = onboard_supplier(body2, db)
+    assert sup1.id != sup2.id
+    assert db.query(Supplier).filter_by(tin="555566667777").count() == 2
 
 
 # --------------------------------------------- Numbering concurrency --------
@@ -167,10 +252,14 @@ def test_concurrent_number_allocation(tmp_path):
     Session = sessionmaker(bind=engine, expire_on_commit=False)
 
     s0 = Session()
-    cfg = get_numbering_config(s0)
+    company = Company(name="ACME", is_default=True)
+    s0.add(company)
+    s0.commit()
+    cfg = get_numbering_config(s0, company.id)
     cfg.company_token = "ACME"
     cfg.pad_width = 5
     s0.commit()
+    company_id = company.id
     s0.close()
 
     results, errors = [], []
@@ -178,7 +267,7 @@ def test_concurrent_number_allocation(tmp_path):
     def worker():
         s = Session()
         try:
-            n = allocate_certificate_number(s, "2025-26")
+            n = allocate_certificate_number(s, company_id, "2025-26")
             s.commit()
             results.append(n)
         except Exception as e:  # noqa: BLE001
@@ -202,9 +291,9 @@ def test_concurrent_number_allocation(tmp_path):
 
 
 # ---------------------------------------------------- Anomaly checks --------
-def test_anomaly_detection_rules(db, sample_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    cert = generate_certificate(db, "111122223333", "2025-26")  # no contacts
+def test_anomaly_detection_rules(db, company, sample_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "111122223333", "2025-26")  # no contacts
     org = get_org_settings(db)
     codes = {a.code for a in check_certificate(db, cert, org)}
     assert "MISSING_EMAIL" in codes
@@ -225,21 +314,94 @@ def test_anomaly_detection_rules(db, sample_xlsx):
     assert "TDS_MISMATCH" in codes
 
 
-def test_missing_challan_anomaly(db, sample_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
+def test_missing_challan_anomaly(db, company, sample_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
     for t in db.query(Transaction).filter_by(tin="444455556666"):
         t.challan_no = None
     db.commit()
-    cert = generate_certificate(db, "444455556666", "2025-26")
+    cert = generate_certificate(db, company.id, "444455556666", "2025-26")
     org = get_org_settings(db)
     codes = {a.code for a in check_certificate(db, cert, org)}
     assert "MISSING_CHALLAN" in codes
 
 
+def _make_clean_certificate(db, company, sample_xlsx):
+    """Beta Supplies has email+WhatsApp+challan mapped; with company seal and
+    officer filled in, its certificate should have zero anomalies."""
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    company.seal_path = "/tmp/seal.png"
+    company.officer_name, company.officer_designation, company.officer_email = "A", "B", "c@d.com"
+    db.commit()
+    return generate_certificate(db, company.id, "444455556666", "2025-26")
+
+
+# ---------------------------------------- Bulk anomaly check (item 5) -------
+def test_bulk_anomaly_check_reports_only_anomalous(db, company, sample_xlsx):
+    clean = _make_clean_certificate(db, company, sample_xlsx)
+    anomalous = generate_certificate(db, company.id, "111122223333", "2025-26")  # no contacts
+
+    results = bulk_anomaly_check(BulkFilterRequest(company_id=company.id), db)
+    ids = {r.certificate_id for r in results}
+    assert clean.id not in ids
+    assert anomalous.id in ids
+
+
+# --------------------------------------------- Bulk send (item 10) ----------
+def test_bulk_send_dispatches_clean_skips_anomalous(db, company, sample_xlsx, monkeypatch):
+    clean = _make_clean_certificate(db, company, sample_xlsx)
+    generate_certificate(db, company.id, "111122223333", "2025-26")  # stays anomalous
+    get_org_settings(db).dispatch_mode = "online"
+    db.commit()
+
+    sent = []
+    monkeypatch.setattr(
+        "app.services.dispatch.queue.send_certificate_email",
+        lambda org, cert, r, job_id=None: sent.append(r))
+
+    results = bulk_dispatch(BulkDispatchRequest(company_id=company.id, channel="email"), db)
+    by_id = {r.certificate_id: r for r in results}
+    assert by_id[clean.id].ok is True
+    assert sent == ["beta@example.com"]
+    anomalous_result = next(r for r in results if r.certificate_id != clean.id)
+    assert anomalous_result.ok is False
+    assert "Skipped" in anomalous_result.error
+
+
+# --------------------------------------- Per-company letterhead (item 12) ---
+_TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def test_letterhead_resolves_per_certificates_own_company(db, company, company2, sample_xlsx, tmp_path):
+    header1 = tmp_path / "header1.png"
+    header2 = tmp_path / "header2.png"
+    header1.write_bytes(_TINY_PNG)
+    header2.write_bytes(_TINY_PNG)
+    company.letterhead_header_path = str(header1)
+    company2.letterhead_header_path = str(header2)
+    db.commit()
+
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company2.id)
+    cert1 = generate_certificate(db, company.id, "444455556666", "2025-26")
+    cert2 = generate_certificate(db, company2.id, "444455556666", "2025-26")
+
+    # Each certificate's own company_id resolves to its own letterhead —
+    # never cross-contaminated, and render succeeds for both.
+    assert cert1.company.letterhead_header_path == str(header1)
+    assert cert2.company.letterhead_header_path == str(header2)
+    path1 = render_certificate_pdf(db, cert1)
+    path2 = render_certificate_pdf(db, cert2)
+    assert os.path.exists(path1) and os.path.exists(path2)
+
+
 # ------------------------------------------------ Offline dispatch ----------
-def test_offline_queue_blocks_then_overrides_then_drains(db, sample_xlsx, monkeypatch):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    cert = generate_certificate(db, "444455556666", "2025-26")
+def test_offline_queue_blocks_then_overrides_then_drains(db, company, sample_xlsx, monkeypatch):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "444455556666", "2025-26")
     org = get_org_settings(db)
     org.dispatch_mode = "offline"
     db.commit()
@@ -268,9 +430,9 @@ def test_offline_queue_blocks_then_overrides_then_drains(db, sample_xlsx, monkey
     assert sent == ["beta@example.com"]
 
 
-def test_queue_retries_and_fails_after_max_attempts(db, sample_xlsx, monkeypatch):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    cert = generate_certificate(db, "444455556666", "2025-26")
+def test_queue_retries_and_fails_after_max_attempts(db, company, sample_xlsx, monkeypatch):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "444455556666", "2025-26")
     get_org_settings(db).dispatch_mode = "offline"
     db.commit()
     jobs = enqueue_dispatch(db, cert, DispatchChannel.WHATSAPP,
@@ -478,30 +640,32 @@ def test_rate_hook_anomalies(db):
 # ------------------------------------------- Vendor onboarding (item 1) -----
 def test_supplier_create_rejects_invalid_fields():
     with pytest.raises(ValidationError, match="12 digits"):
-        SupplierCreate(name="Gamma", address="Dhaka", tin="12345", bin="B1",
+        SupplierCreate(company_id=1, name="Gamma", address="Dhaka", tin="12345", bin="B1",
                        email="a@b.com", whatsapp="+8801711111111")
     with pytest.raises(ValidationError, match="email"):
-        SupplierCreate(name="Gamma", address="Dhaka", tin="111122223333", bin="B1",
+        SupplierCreate(company_id=1, name="Gamma", address="Dhaka", tin="111122223333", bin="B1",
                        email="not-an-email", whatsapp="+8801711111111")
     with pytest.raises(ValidationError, match="WhatsApp"):
-        SupplierCreate(name="Gamma", address="Dhaka", tin="111122223333", bin="B1",
+        SupplierCreate(company_id=1, name="Gamma", address="Dhaka", tin="111122223333", bin="B1",
                        email="a@b.com", whatsapp="abc")
     with pytest.raises(ValidationError, match="required"):
-        SupplierCreate(name="", address="Dhaka", tin="111122223333", bin="B1",
+        SupplierCreate(company_id=1, name="", address="Dhaka", tin="111122223333", bin="B1",
                        email="a@b.com", whatsapp="+8801711111111")
 
 
-def test_supplier_onboarding_creates_then_upserts_by_tin(db):
-    body = SupplierCreate(name="Gamma Traders", address="Dhaka", tin="555566667777",
-                          bin="BIN001", email="gamma@example.com", whatsapp="+8801711112222")
+def test_supplier_onboarding_creates_then_upserts_by_tin(db, company):
+    body = SupplierCreate(company_id=company.id, name="Gamma Traders", address="Dhaka",
+                          tin="555566667777", bin="BIN001", email="gamma@example.com",
+                          whatsapp="+8801711112222")
     sup = onboard_supplier(body, db)
     assert sup.tin == "555566667777" and sup.bin == "BIN001"
     emails = [c.value for c in sup.contacts if c.kind == ContactKind.EMAIL]
     assert emails == ["gamma@example.com"]
 
-    # Re-onboarding the same TIN updates the existing supplier instead of duplicating.
-    body2 = SupplierCreate(name="Gamma Traders Ltd", address="Chattogram", tin="555566667777",
-                           bin="BIN002", email="new@example.com", whatsapp="+8801711113333")
+    # Re-onboarding the same (company, TIN) updates the existing supplier instead of duplicating.
+    body2 = SupplierCreate(company_id=company.id, name="Gamma Traders Ltd", address="Chattogram",
+                           tin="555566667777", bin="BIN002", email="new@example.com",
+                           whatsapp="+8801711113333")
     sup2 = onboard_supplier(body2, db)
     assert sup2.id == sup.id
     assert sup2.name == "Gamma Traders Ltd" and sup2.bin == "BIN002"
@@ -512,7 +676,7 @@ def test_supplier_onboarding_creates_then_upserts_by_tin(db):
 @pytest.fixture
 def challan_xlsx(tmp_path):
     """Challan file auto-filling the Alpha Traders December'25 row created by
-    sample_xlsx, including the adjusted bill/TDS/VDS amounts."""
+    sample_xlsx, including the adjusted bill/TDS amounts (never VDS)."""
     wb = Workbook()
     ws = wb.active
     headers = ["TIN", "Month", "Challan No", "Challan Date", "Total Challan Amount",
@@ -527,9 +691,9 @@ def challan_xlsx(tmp_path):
     return str(path)
 
 
-def test_challan_import_autofills_amounts_and_returns_updated_ids(db, sample_xlsx, challan_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    batch, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx")
+def test_challan_import_autofills_amounts_and_returns_updated_ids(db, company, sample_xlsx, challan_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    batch, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx", company.id)
     assert batch.ok_rows == 1
     assert batch.error_rows == 1  # unmatched TIN row
     assert any("No transaction matches" in e.message for e in batch.errors)
@@ -541,12 +705,21 @@ def test_challan_import_autofills_amounts_and_returns_updated_ids(db, sample_xls
     assert t.total_challan_amount == 99000
     assert t.sum_of_bill_amount == 101000
     assert t.sum_of_tds == 5100
-    assert t.sum_of_vds == -5000
+    assert t.sum_of_vds is None  # never auto-populated (item 7)
 
 
-def test_transaction_manual_override_after_autofill(db, sample_xlsx, challan_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    _, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx")
+def test_challan_import_scoped_to_company(db, company, company2, sample_xlsx, challan_xlsx):
+    """A challan file only auto-fills transactions within the given company."""
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company2.id)
+    _, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx", company.id)
+    touched = db.query(Transaction).filter(Transaction.id.in_(updated_ids)).all()
+    assert touched and all(t.company_id == company.id for t in touched)
+
+
+def test_transaction_manual_override_after_autofill(db, company, sample_xlsx, challan_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    _, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx", company.id)
     txn_id = updated_ids[0]
 
     adjusted = adjust_transaction(txn_id, TransactionAdjust(sum_of_tds=5200, challan_no="2526-999-CORRECTED"), db)
@@ -557,17 +730,18 @@ def test_transaction_manual_override_after_autofill(db, sample_xlsx, challan_xls
 
 
 # --------------------------------------- Signature/seal split (item 8) ------
-def test_missing_seal_anomaly_satisfied_by_split_images(db, sample_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
-    cert = generate_certificate(db, "111122223333", "2025-26")
+def test_missing_seal_anomaly_satisfied_by_company_seal(db, company, sample_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "111122223333", "2025-26")
     org = get_org_settings(db)
-    org.officer_name, org.officer_designation, org.officer_email = "A", "B", "c@d.com"
+    company.officer_name, company.officer_designation, company.officer_email = "A", "B", "c@d.com"
+    db.commit()
 
     codes = {a.code for a in check_certificate(db, cert, org)}
-    assert "MISSING_SEAL" in codes  # neither legacy nor split images uploaded
+    assert "MISSING_SEAL" in codes  # no seal uploaded yet
 
-    org.signature_path = "/tmp/sig.png"
-    org.seal_path = "/tmp/seal.png"
+    company.seal_path = "/tmp/seal.png"
+    db.commit()
     codes = {a.code for a in check_certificate(db, cert, org)}
     assert "MISSING_SEAL" not in codes
 
@@ -578,10 +752,13 @@ def test_number_format_default_matches_legacy_output(tmp_path):
     engine = create_engine(url, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     s = sessionmaker(bind=engine, expire_on_commit=False)()
-    cfg = get_numbering_config(s)
+    company = Company(name="ACME", is_default=True)
+    s.add(company)
+    s.commit()
+    cfg = get_numbering_config(s, company.id)
     cfg.company_token = "ACME"
     s.commit()
-    n = allocate_certificate_number(s, "2025-26")
+    n = allocate_certificate_number(s, company.id, "2025-26")
     assert n == "ACME/2025-26/1"
 
 
@@ -590,9 +767,36 @@ def test_number_format_supports_reordered_tokens(tmp_path):
     engine = create_engine(url, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     s = sessionmaker(bind=engine, expire_on_commit=False)()
-    cfg = get_numbering_config(s)
+    company = Company(name="ACME", is_default=True)
+    s.add(company)
+    s.commit()
+    cfg = get_numbering_config(s, company.id)
     cfg.company_token = "ACME"
     cfg.number_format = "{FiscalYear}-{AutoNumber}-{CompanyName}"
     s.commit()
-    n = allocate_certificate_number(s, "2025-26")
+    n = allocate_certificate_number(s, company.id, "2025-26")
     assert n == "2025-26-1-ACME"
+
+
+def test_number_format_independent_per_company(tmp_path):
+    """Two companies with identical settings never collide (item 9 + full
+    multi-tenant numbering)."""
+    url = f"sqlite:///{tmp_path}/fmt3.db"
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine, expire_on_commit=False)()
+    c1 = Company(name="ACME", is_default=True)
+    c2 = Company(name="Beta")
+    s.add_all([c1, c2])
+    s.commit()
+    for c in (c1, c2):
+        cfg = get_numbering_config(s, c.id)
+        cfg.company_token = c.name
+        s.commit()
+
+    n1a = allocate_certificate_number(s, c1.id, "2025-26")
+    n2a = allocate_certificate_number(s, c2.id, "2025-26")
+    n1b = allocate_certificate_number(s, c1.id, "2025-26")
+    assert n1a == "ACME/2025-26/1"
+    assert n2a == "Beta/2025-26/1"  # independent sequence, also starts at 1
+    assert n1b == "ACME/2025-26/2"

@@ -87,10 +87,11 @@ def check_certificate(db: Session, cert: Certificate, org: OrgSettings) -> list[
                     f"expected {rate_row.rate:.2%} for section {ln.section} "
                     f"(expected amount ≈ {expected:,.2f})"))
 
-    # --- duplicate (TIN, period) ---
+    # --- duplicate (TIN, period), scoped to the same company ---
     dup = (
         db.query(Certificate)
-        .filter(Certificate.tin == cert.tin, Certificate.period == cert.period,
+        .filter(Certificate.company_id == cert.company_id, Certificate.tin == cert.tin,
+                Certificate.period == cert.period,
                 Certificate.id != cert.id, Certificate.status != CertStatus.VOID)
         .first()
     )
@@ -100,10 +101,19 @@ def check_certificate(db: Session, cert: Certificate, org: OrgSettings) -> list[
             f"Another certificate exists for TIN {cert.tin} / {cert.period}: "
             f"{dup.certificate_no}"))
 
-    # --- org settings completeness ---
-    if not (org.seal_signature_path or (org.signature_path and org.seal_path)):
+    # --- company settings completeness (falls back to the legacy singleton
+    # org fields for a company that hasn't set its own yet) ---
+    company = cert.company
+    has_seal = bool(
+        company and company.seal_path
+        or org.seal_signature_path or (org.signature_path and org.seal_path)
+    )
+    if not has_seal:
         anomalies.append(Anomaly("MISSING_SEAL", "Seal/signature image not uploaded in Settings"))
-    if not (org.officer_name and org.officer_designation and org.officer_email):
+    officer_name = (company and company.officer_name) or org.officer_name
+    officer_designation = (company and company.officer_designation) or org.officer_designation
+    officer_email = (company and company.officer_email) or org.officer_email
+    if not (officer_name and officer_designation and officer_email):
         anomalies.append(Anomaly("MISSING_OFFICER", "Designated officer details incomplete in Settings"))
 
     return anomalies
