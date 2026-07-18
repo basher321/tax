@@ -240,7 +240,9 @@ class OrgSettings(Base):
     company_name: Mapped[str | None] = mapped_column(String(255))
     company_address: Mapped[str | None] = mapped_column(Text)
     logo_path: Mapped[str | None] = mapped_column(String(512))
-    seal_signature_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha
+    seal_signature_path: Mapped[str | None] = mapped_column(String(512))  # legacy combined PNG w/ alpha
+    signature_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha, preferred over the legacy combined field
+    seal_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha, preferred over the legacy combined field
     officer_name: Mapped[str | None] = mapped_column(String(255))
     officer_designation: Mapped[str | None] = mapped_column(String(255))
     officer_email: Mapped[str | None] = mapped_column(String(255))
@@ -281,6 +283,12 @@ class NumberingConfig(Base):
     start_number: Mapped[int] = mapped_column(Integer, default=1)
     reset_policy: Mapped[str] = mapped_column(String(16), default="per_fiscal_year")
     separator: Mapped[str] = mapped_column(String(4), default="/")
+    # Admin-editable token template. Supported tokens: {CompanyName}, {FiscalYear},
+    # {AutoNumber}, {sep} (substituted with `separator`). Default reproduces the
+    # historical hardcoded "{company}{sep}{fy}{sep}{number}" format exactly.
+    number_format: Mapped[str] = mapped_column(
+        String(128), default="{CompanyName}{sep}{FiscalYear}{sep}{AutoNumber}"
+    )
 
 
 class NumberSequence(Base):

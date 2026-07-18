@@ -349,6 +349,100 @@ function Preview({ certId, onClose }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Vendor onboarding modal: Email, WhatsApp, Company Name, Company     */
+/* Address, TIN (12-digit), BIN are all mandatory — validated inline   */
+/* client-side, and re-validated server-side by POST /suppliers.       */
+/* ------------------------------------------------------------------ */
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const WHATSAPP_RE = /^\+?\d{10,15}$/;
+const TIN_RE = /^\d{12}$/;
+
+const VENDOR_FIELDS = [
+  { key: "name", label: "Company name" },
+  { key: "address", label: "Company address" },
+  { key: "tin", label: "TIN (12 digits)" },
+  { key: "bin", label: "BIN" },
+  { key: "email", label: "Email" },
+  { key: "whatsapp", label: "WhatsApp No." },
+];
+
+function validateVendorField(key, value) {
+  const v = (value || "").trim();
+  if (!v) return "This field is required";
+  if (key === "tin" && !TIN_RE.test(v.replace(/\D/g, "")))
+    return "TIN must be exactly 12 digits";
+  if (key === "email" && !EMAIL_RE.test(v))
+    return "Enter a valid email address";
+  if (key === "whatsapp" && !WHATSAPP_RE.test(v.replace(/[\s-]/g, "")))
+    return "Enter a valid WhatsApp number (10-15 digits)";
+  return null;
+}
+
+function VendorOnboardingModal({ onClose, onCreated }) {
+  const [form, setForm] = useState({ name: "", address: "", tin: "", bin: "", email: "", whatsapp: "" });
+  const [touched, setTouched] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState(null);
+
+  const errors = useMemo(
+    () => Object.fromEntries(VENDOR_FIELDS.map(({ key }) => [key, validateVendorField(key, form[key])])),
+    [form],
+  );
+  const isValid = Object.values(errors).every((e) => !e);
+
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const blur = (k) => () => setTouched({ ...touched, [k]: true });
+
+  async function submit() {
+    setTouched(Object.fromEntries(VENDOR_FIELDS.map(({ key }) => [key, true])));
+    if (!isValid) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      const supplier = await api.createSupplier(form);
+      onCreated(supplier);
+    } catch (err) {
+      setServerError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-ink/50 flex items-start justify-center overflow-auto p-6 z-30">
+      <div className="bg-white rounded-lg w-full max-w-lg">
+        <div className="flex items-center gap-2 px-5 py-3 border-b border-rule">
+          <h2 className="font-medium mr-auto">Add vendor</h2>
+          <button className="btn-ghost" onClick={onClose}>Close</button>
+        </div>
+        <div className="p-5 space-y-3">
+          {serverError && (
+            <p className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{serverError}</p>
+          )}
+          {VENDOR_FIELDS.map(({ key, label }) => (
+            <div key={key}>
+              <span className="label">{label}</span>
+              <input
+                className={`input ${touched[key] && errors[key] ? "border-red-400 focus:border-red-500" : ""}`}
+                value={form[key]}
+                onChange={set(key)}
+                onBlur={blur(key)}
+              />
+              {touched[key] && errors[key] && (
+                <p className="text-xs text-red-700 mt-1">{errors[key]}</p>
+              )}
+            </div>
+          ))}
+          <button className="btn-primary w-full" onClick={submit} disabled={busy || !isValid}>
+            {busy ? "Saving..." : "Save vendor"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Main screen: search/filter + pending groupings + generated list     */
 /* ------------------------------------------------------------------ */
 export default function CertificateIssue() {
@@ -359,6 +453,7 @@ export default function CertificateIssue() {
   const [checked, setChecked] = useState({});
   const [previewId, setPreviewId] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [showVendorModal, setShowVendorModal] = useState(false);
 
   const search = (nextPage = page) =>
     api.searchCertificates({ ...filters, page: nextPage, page_size: 20 }).then(setResults);
@@ -417,7 +512,10 @@ export default function CertificateIssue() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Certificate Issue</h1>
+      <div className="flex items-center">
+        <h1 className="text-xl font-semibold mr-auto">Certificate Issue</h1>
+        <button className="btn-primary" onClick={() => setShowVendorModal(true)}>+ Add Vendor</button>
+      </div>
       {notice && <p className="text-sm text-ledger">{notice}</p>}
 
       {/* Search & filter - TIN, BIN, Supplier Name, Date range (combinable) */}
@@ -514,6 +612,15 @@ export default function CertificateIssue() {
       </div>
 
       {previewId && <Preview certId={previewId} onClose={() => { setPreviewId(null); search(); }} />}
+      {showVendorModal && (
+        <VendorOnboardingModal
+          onClose={() => setShowVendorModal(false)}
+          onCreated={(supplier) => {
+            setShowVendorModal(false);
+            setNotice(`Vendor ${supplier.name} saved (TIN ${supplier.tin}).`);
+          }}
+        />
+      )}
     </div>
   );
 }

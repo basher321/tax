@@ -292,7 +292,28 @@ def render_certificate_pdf(db, cert) -> str:
 
     # ---------- Footer: officer block + seal/signature + auto date -----------
     seal_cell = []
-    if org.seal_signature_path and os.path.exists(org.seal_signature_path):
+    has_split_images = (
+        (org.signature_path and os.path.exists(org.signature_path))
+        or (org.seal_path and os.path.exists(org.seal_path))
+    )
+    if has_split_images:
+        # Preferred: separate signature + seal images, side by side.
+        sig_img = ((_fitted_image(org.signature_path, 26, 18) or "")
+                  if org.signature_path and os.path.exists(org.signature_path) else "")
+        seal_img = ((_fitted_image(org.seal_path, 26, 18) or "")
+                   if org.seal_path and os.path.exists(org.seal_path) else "")
+        pair = Table([[sig_img, seal_img]], colWidths=[27 * mm, 27 * mm])
+        pair.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        seal_cell.append(pair)
+        seal_cell.append(Spacer(1, 1 * mm))
+    elif org.seal_signature_path and os.path.exists(org.seal_signature_path):
+        # Legacy: single combined image (backward compatible with orgs that
+        # never re-upload after the signature/seal split).
         img = _fitted_image(org.seal_signature_path, 45, 22)
         if img is not None:
             img.hAlign = "CENTER"

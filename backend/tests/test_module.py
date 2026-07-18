@@ -8,11 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401 — register tables
+from app.api.routes import adjust_transaction, onboard_supplier
 from app.database import Base
 from app.models.entities import (
     Certificate,
@@ -26,6 +28,7 @@ from app.models.entities import (
     TaxRate,
     Transaction,
 )
+from app.schemas import SupplierCreate, TransactionAdjust
 from app.services import rate_hook
 from app.services.aggregation import build_certificate_data
 from app.services.amount_in_words import amount_in_words
@@ -39,6 +42,7 @@ from app.services.dispatch.email_sender import send_test_email
 from app.services.dispatch.whatsapp_sender import send_certificate_whatsapp
 from app.services.excel_import import (
     fiscal_year_for,
+    import_challan_file,
     import_depot_workbook,
     parse_month_label,
 )
@@ -469,3 +473,126 @@ def test_rate_hook_anomalies(db):
         rate_hook.RateUpdate(section="90", kind="tds", rate=5.0),
     ])
     assert r["applied"] == 0 and len(r["anomalies"]) == 2
+
+
+# ------------------------------------------- Vendor onboarding (item 1) -----
+def test_supplier_create_rejects_invalid_fields():
+    with pytest.raises(ValidationError, match="12 digits"):
+        SupplierCreate(name="Gamma", address="Dhaka", tin="12345", bin="B1",
+                       email="a@b.com", whatsapp="+8801711111111")
+    with pytest.raises(ValidationError, match="email"):
+        SupplierCreate(name="Gamma", address="Dhaka", tin="111122223333", bin="B1",
+                       email="not-an-email", whatsapp="+8801711111111")
+    with pytest.raises(ValidationError, match="WhatsApp"):
+        SupplierCreate(name="Gamma", address="Dhaka", tin="111122223333", bin="B1",
+                       email="a@b.com", whatsapp="abc")
+    with pytest.raises(ValidationError, match="required"):
+        SupplierCreate(name="", address="Dhaka", tin="111122223333", bin="B1",
+                       email="a@b.com", whatsapp="+8801711111111")
+
+
+def test_supplier_onboarding_creates_then_upserts_by_tin(db):
+    body = SupplierCreate(name="Gamma Traders", address="Dhaka", tin="555566667777",
+                          bin="BIN001", email="gamma@example.com", whatsapp="+8801711112222")
+    sup = onboard_supplier(body, db)
+    assert sup.tin == "555566667777" and sup.bin == "BIN001"
+    emails = [c.value for c in sup.contacts if c.kind == ContactKind.EMAIL]
+    assert emails == ["gamma@example.com"]
+
+    # Re-onboarding the same TIN updates the existing supplier instead of duplicating.
+    body2 = SupplierCreate(name="Gamma Traders Ltd", address="Chattogram", tin="555566667777",
+                           bin="BIN002", email="new@example.com", whatsapp="+8801711113333")
+    sup2 = onboard_supplier(body2, db)
+    assert sup2.id == sup.id
+    assert sup2.name == "Gamma Traders Ltd" and sup2.bin == "BIN002"
+    assert db.query(Supplier).filter_by(tin="555566667777").count() == 1
+
+
+# ------------------------------------------ Challan upload + override -------
+@pytest.fixture
+def challan_xlsx(tmp_path):
+    """Challan file auto-filling the Alpha Traders December'25 row created by
+    sample_xlsx, including the adjusted bill/TDS/VDS amounts."""
+    wb = Workbook()
+    ws = wb.active
+    headers = ["TIN", "Month", "Challan No", "Challan Date", "Total Challan Amount",
+              "Section", "Sum of Bill Amount", "Sum of TDS", "Sum of VDS"]
+    ws.append(headers)
+    ws.append(["111122223333", "December'25", "2526-999", "20/01/2026",
+               99000, "90", 101000, 5100, -5000])
+    ws.append(["000000000000", "December'25", "2526-000", "20/01/2026",
+               1000, "90", 1000, 100, -50])  # no matching transaction
+    path = tmp_path / "challan.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+def test_challan_import_autofills_amounts_and_returns_updated_ids(db, sample_xlsx, challan_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
+    batch, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx")
+    assert batch.ok_rows == 1
+    assert batch.error_rows == 1  # unmatched TIN row
+    assert any("No transaction matches" in e.message for e in batch.errors)
+
+    txns = db.query(Transaction).filter(Transaction.id.in_(updated_ids)).all()
+    assert len(txns) == 1
+    t = txns[0]
+    assert t.challan_no == "2526-999"
+    assert t.total_challan_amount == 99000
+    assert t.sum_of_bill_amount == 101000
+    assert t.sum_of_tds == 5100
+    assert t.sum_of_vds == -5000
+
+
+def test_transaction_manual_override_after_autofill(db, sample_xlsx, challan_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
+    _, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx")
+    txn_id = updated_ids[0]
+
+    adjusted = adjust_transaction(txn_id, TransactionAdjust(sum_of_tds=5200, challan_no="2526-999-CORRECTED"), db)
+    assert adjusted.sum_of_tds == 5200
+    assert adjusted.challan_no == "2526-999-CORRECTED"
+    # Fields not included in the override are left untouched.
+    assert adjusted.total_challan_amount == 99000
+
+
+# --------------------------------------- Signature/seal split (item 8) ------
+def test_missing_seal_anomaly_satisfied_by_split_images(db, sample_xlsx):
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx")
+    cert = generate_certificate(db, "111122223333", "2025-26")
+    org = get_org_settings(db)
+    org.officer_name, org.officer_designation, org.officer_email = "A", "B", "c@d.com"
+
+    codes = {a.code for a in check_certificate(db, cert, org)}
+    assert "MISSING_SEAL" in codes  # neither legacy nor split images uploaded
+
+    org.signature_path = "/tmp/sig.png"
+    org.seal_path = "/tmp/seal.png"
+    codes = {a.code for a in check_certificate(db, cert, org)}
+    assert "MISSING_SEAL" not in codes
+
+
+# ------------------------------------ Configurable number format (item 9) ---
+def test_number_format_default_matches_legacy_output(tmp_path):
+    url = f"sqlite:///{tmp_path}/fmt.db"
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine, expire_on_commit=False)()
+    cfg = get_numbering_config(s)
+    cfg.company_token = "ACME"
+    s.commit()
+    n = allocate_certificate_number(s, "2025-26")
+    assert n == "ACME/2025-26/1"
+
+
+def test_number_format_supports_reordered_tokens(tmp_path):
+    url = f"sqlite:///{tmp_path}/fmt2.db"
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine, expire_on_commit=False)()
+    cfg = get_numbering_config(s)
+    cfg.company_token = "ACME"
+    cfg.number_format = "{FiscalYear}-{AutoNumber}-{CompanyName}"
+    s.commit()
+    n = allocate_certificate_number(s, "2025-26")
+    assert n == "2025-26-1-ACME"

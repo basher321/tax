@@ -60,4 +60,20 @@ def allocate_certificate_number(db: Session, period: str) -> str:
 
     number = str(value).zfill(cfg.pad_width)
     fy = _format_fiscal_year(period, cfg.fiscal_year_format)
-    return f"{cfg.company_token}{cfg.separator}{fy}{cfg.separator}{number}"
+    return render_number_format(cfg.number_format, cfg.company_token, fy, number, cfg.separator)
+
+
+def render_number_format(template: str, company: str, fiscal_year: str,
+                         auto_number: str, separator: str) -> str:
+    """Substitute the whitelisted tokens in an admin-configured format string.
+
+    Plain str.replace (not str.format) so admin-supplied text can never be
+    interpreted as a format spec / trigger a KeyError on stray braces.
+    """
+    return (
+        template
+        .replace("{CompanyName}", company)
+        .replace("{FiscalYear}", fiscal_year)
+        .replace("{AutoNumber}", auto_number)
+        .replace("{sep}", separator)
+    )

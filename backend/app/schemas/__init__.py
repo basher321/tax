@@ -1,6 +1,13 @@
+import re
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+# Shared with services/validation.py's anomaly checks; kept in sync manually
+# since schemas has no dependency on services.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_RE = re.compile(r"^\+?\d{10,15}$")
+_TIN_12_RE = re.compile(r"^\d{12}$")
 
 
 class ORM(BaseModel):
@@ -29,6 +36,50 @@ class SupplierUpdate(BaseModel):
     name: str | None = None
     address: str | None = None
     party_type: str | None = None
+
+
+class SupplierCreate(BaseModel):
+    """Vendor onboarding: all six fields are mandatory and validated here as
+    well as client-side — the client check alone never protects the API."""
+
+    name: str
+    address: str
+    tin: str
+    bin: str
+    email: str
+    whatsapp: str
+
+    @field_validator("name", "address", "bin")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("This field is required")
+        return v
+
+    @field_validator("tin")
+    @classmethod
+    def _tin_12_digits(cls, v: str) -> str:
+        v = re.sub(r"\D", "", v or "")
+        if not _TIN_12_RE.match(v):
+            raise ValueError("TIN must be exactly 12 digits")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def _email_format(cls, v: str) -> str:
+        v = v.strip()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("Enter a valid email address")
+        return v
+
+    @field_validator("whatsapp")
+    @classmethod
+    def _whatsapp_format(cls, v: str) -> str:
+        v = v.strip()
+        if not _PHONE_RE.match(re.sub(r"[\s-]", "", v)):
+            raise ValueError("Enter a valid WhatsApp number (10-15 digits)")
+        return v
 
 
 class ContactCreate(BaseModel):
@@ -161,6 +212,34 @@ class NumberingIn(BaseModel):
     start_number: int | None = None
     reset_policy: str | None = None
     separator: str | None = None
+    number_format: str | None = None
+
+
+class TransactionOut(ORM):
+    id: int
+    tin: str | None
+    supplier_name: str | None
+    month: str | None
+    section: str | None
+    challan_no: str | None
+    challan_date: date | None
+    total_challan_amount: float | None
+    sum_of_bill_amount: float | None
+    sum_of_tds: float | None
+    sum_of_vds: float | None
+
+
+class TransactionAdjust(BaseModel):
+    """Manual override of auto-filled challan/amount fields after a challan
+    upload. All fields optional — only supplied ones are updated."""
+
+    challan_no: str | None = None
+    challan_date: date | None = None
+    total_challan_amount: float | None = None
+    section: str | None = None
+    sum_of_bill_amount: float | None = None
+    sum_of_tds: float | None = None
+    sum_of_vds: float | None = None
 
 
 class RateUpdateIn(BaseModel):

@@ -27,6 +27,13 @@ export const api = {
     fd.append("file", file);
     return request("/import/depot", { method: "POST", body: fd });
   },
+  uploadChallan: (file) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request("/import/challan", { method: "POST", body: fd });
+  },
+  adjustTransaction: (id, body) =>
+    request(`/transactions/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   importBatches: () => request("/import/batches"),
 
   pendingGroupings: () => request("/certificates/pending"),
@@ -63,6 +70,8 @@ export const api = {
   whatsappLinks: (id) => request(`/certificates/${id}/whatsapp-links`),
   logoUrl: `${BASE}/settings/org/logo`,
   sealUrl: `${BASE}/settings/org/seal`,
+  signatureUrl: `${BASE}/settings/org/signature`,
+  sealImageUrl: `${BASE}/settings/org/seal-image`,
 
   getOrg: () => request("/settings/org"),
   updateOrg: (body) =>
@@ -76,6 +85,14 @@ export const api = {
     const fd = new FormData(); fd.append("file", file);
     return request("/settings/org/seal", { method: "POST", body: fd });
   },
+  uploadSignature: (file) => {
+    const fd = new FormData(); fd.append("file", file);
+    return request("/settings/org/signature", { method: "POST", body: fd });
+  },
+  uploadSealImage: (file) => {
+    const fd = new FormData(); fd.append("file", file);
+    return request("/settings/org/seal-image", { method: "POST", body: fd });
+  },
   getNumbering: () => request("/settings/numbering"),
   updateNumbering: (body) =>
     request("/settings/numbering", { method: "PUT", body: JSON.stringify(body) }),
@@ -83,4 +100,7 @@ export const api = {
     request("/settings/database/reset", {
       method: "POST", body: JSON.stringify({ confirm }),
     }),
+
+  createSupplier: (body) =>
+    request("/suppliers", { method: "POST", body: JSON.stringify(body) }),
 };

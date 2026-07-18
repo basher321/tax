@@ -42,6 +42,7 @@ export default function Settings() {
     for (const k of ["smtp_password", "wa_token", "wa_twilio_auth"])
       if (typeof body[k] === "boolean") delete body[k];
     delete body.id; delete body.logo_path; delete body.seal_signature_path;
+    delete body.signature_path; delete body.seal_path;
     await api.updateOrg(body);
     setNotice("Settings saved.");
   }
@@ -91,7 +92,22 @@ export default function Settings() {
     setNotice(`${label} uploaded.`);
   };
 
-  const example = `${num.company_token}${num.separator}2025-26${num.separator}${String(num.start_number).padStart(Number(num.pad_width), "0")}`;
+  // Mirrors backend numbering.render_number_format's token substitution
+  // exactly, so the preview here always matches the generated number.
+  function formatNumberPreview() {
+    const [fyStart, fyEnd] = "2025-26".split("-");
+    const fy = num.fiscal_year_format === "YYYY" ? fyStart
+      : num.fiscal_year_format === "YY-YY" ? `${fyStart.slice(-2)}-${fyEnd}`
+      : `${fyStart}-${fyEnd}`;
+    const autoNumber = String(num.start_number).padStart(Number(num.pad_width), "0");
+    const template = num.number_format || "{CompanyName}{sep}{FiscalYear}{sep}{AutoNumber}";
+    return template
+      .split("{CompanyName}").join(num.company_token)
+      .split("{FiscalYear}").join(fy)
+      .split("{AutoNumber}").join(autoNumber)
+      .split("{sep}").join(num.separator);
+  }
+  const example = formatNumberPreview();
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -120,13 +136,36 @@ export default function Settings() {
           These render on every generated certificate. The issue date is placed
           automatically under the seal and signature block.
         </p>
-        <Field label="Seal + signature image (PNG with transparency)">
-          <label className="btn-ghost cursor-pointer inline-block">
-            {org.seal_signature_path ? "Replace image" : "Upload image"}
-            <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={upload(api.uploadSeal, "Seal/signature", "seal_signature_path")} />
-          </label>
-          {org.seal_signature_path && <span className="text-xs text-ledger ml-2">✓ on file</span>}
-        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Signature image (PNG with transparency)">
+            <div className="flex items-center gap-3">
+              {org.signature_path && (
+                <img src={`${api.signatureUrl}?t=${org.signature_path}`} alt="Signature preview" className="h-10 border border-rule rounded bg-white object-contain" />
+              )}
+              <label className="btn-ghost cursor-pointer inline-block">
+                {org.signature_path ? "Replace signature" : "Upload signature"}
+                <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={upload(api.uploadSignature, "Signature", "signature_path")} />
+              </label>
+            </div>
+          </Field>
+          <Field label="Seal image (PNG with transparency)">
+            <div className="flex items-center gap-3">
+              {org.seal_path && (
+                <img src={`${api.sealImageUrl}?t=${org.seal_path}`} alt="Seal preview" className="h-10 border border-rule rounded bg-white object-contain" />
+              )}
+              <label className="btn-ghost cursor-pointer inline-block">
+                {org.seal_path ? "Replace seal" : "Upload seal"}
+                <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={upload(api.uploadSealImage, "Seal", "seal_path")} />
+              </label>
+            </div>
+          </Field>
+        </div>
+        {org.seal_signature_path && !org.signature_path && !org.seal_path && (
+          <p className="text-xs text-ink/50">
+            A legacy combined seal/signature image is on file and will keep rendering on certificates
+            until you upload the two images above.
+          </p>
+        )}
         <div className="grid grid-cols-3 gap-3">
           <Field label="Officer name"><input className="input" value={org.officer_name || ""} onChange={setO("officer_name")} /></Field>
           <Field label="Designation"><input className="input" value={org.officer_designation || ""} onChange={setO("officer_designation")} /></Field>
@@ -160,6 +199,9 @@ export default function Settings() {
             </select>
           </Field>
         </div>
+        <Field label="Number format (tokens: {CompanyName}, {FiscalYear}, {AutoNumber}, {sep})">
+          <input className="input font-mono" value={num.number_format || ""} onChange={setN("number_format")} />
+        </Field>
         <p className="text-sm">Next number will look like: <span className="font-mono">{example}</span></p>
         <button className="btn-primary" onClick={saveNumbering}>Save numbering</button>
       </section>

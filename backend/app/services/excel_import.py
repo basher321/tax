@@ -275,12 +275,18 @@ def import_depot_workbook(db: Session, path: str, filename: str) -> ImportBatch:
     return batch
 
 
-def import_challan_file(db: Session, path: str, filename: str) -> ImportBatch:
+def import_challan_file(db: Session, path: str, filename: str) -> tuple[ImportBatch, list[int]]:
     """Challan upload: auto-populate Challan No/Date/Total Challan Amount/Section
-    on matching (TIN or supplier name, Month) transaction records.
+    and the adjusted Sum of Bill Amount/TDS/VDS on matching (TIN or supplier
+    name, Month) transaction records. Manual override afterward happens via
+    PATCH /api/transactions/{id}.
 
     Expected columns (flexible header row): TIN and/or Supplier Name, Month,
-    Challan No, Challan Date, Total Challan Amount, Section (optional).
+    Challan No, Challan Date, Total Challan Amount, Section, and optionally
+    Sum of Bill Amount / Sum of TDS / Sum of VDS (same headers as Depot-SCB).
+
+    Returns (batch, updated_transaction_ids) so the route can surface exactly
+    which rows changed for review/manual override.
     """
     raw = pd.read_excel(path, header=None, dtype=object)
     header_idx = 0
@@ -305,12 +311,16 @@ def import_challan_file(db: Session, path: str, filename: str) -> ImportBatch:
     c_date = col("Challan Date", "Challan date")
     c_amt = col("Total Challan Amount", "Total amount in the challan")
     c_sec = col("Section")
+    c_bill = col("Sum of Bill Amount")
+    c_tds = col("Sum of TDS")
+    c_vds = col("Sum of VDS")
 
     batch = ImportBatch(filename=filename, kind="challan", total_rows=len(df))
     db.add(batch)
     db.flush()
 
     ok = err = 0
+    updated_ids: list[int] = []
     for idx, row in df.iterrows():
         excel_row = idx + header_idx + 2
         challan_no = _clean(row.get(c_no)) if c_no else None
@@ -347,6 +357,9 @@ def import_challan_file(db: Session, path: str, filename: str) -> ImportBatch:
         ch_date = _parse_date(row.get(c_date)) if c_date else None
         ch_amt = _parse_number(row.get(c_amt)) if c_amt else None
         ch_sec = _clean(row.get(c_sec)) if c_sec else None
+        ch_bill = _parse_number(row.get(c_bill)) if c_bill else None
+        ch_tds = _parse_number(row.get(c_tds)) if c_tds else None
+        ch_vds = _parse_number(row.get(c_vds)) if c_vds else None
         for t in matches:
             t.challan_no = challan_no
             if ch_date:
@@ -355,9 +368,16 @@ def import_challan_file(db: Session, path: str, filename: str) -> ImportBatch:
                 t.total_challan_amount = ch_amt
             if ch_sec:
                 t.section = ch_sec
+            if ch_bill is not None:
+                t.sum_of_bill_amount = ch_bill
+            if ch_tds is not None:
+                t.sum_of_tds = ch_tds
+            if ch_vds is not None:
+                t.sum_of_vds = ch_vds
+            updated_ids.append(t.id)
         ok += 1
 
     batch.ok_rows = ok
     batch.error_rows = err
     db.commit()
-    return batch
+    return batch, updated_ids

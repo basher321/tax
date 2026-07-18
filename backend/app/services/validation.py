@@ -101,7 +101,7 @@ def check_certificate(db: Session, cert: Certificate, org: OrgSettings) -> list[
             f"{dup.certificate_no}"))
 
     # --- org settings completeness ---
-    if not org.seal_signature_path:
+    if not (org.seal_signature_path or (org.signature_path and org.seal_path)):
         anomalies.append(Anomaly("MISSING_SEAL", "Seal/signature image not uploaded in Settings"))
     if not (org.officer_name and org.officer_designation and org.officer_email):
         anomalies.append(Anomaly("MISSING_OFFICER", "Designated officer details incomplete in Settings"))

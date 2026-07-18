@@ -46,7 +46,10 @@ from ..schemas import (
     OrgSettingsIn,
     RateUpdateIn,
     RemarksUpdate,
+    SupplierCreate,
     TinStatusUpdate,
+    TransactionAdjust,
+    TransactionOut,
     DatabaseResetRequest,
     SupplierOut,
     SupplierUpdate,
@@ -62,7 +65,11 @@ from ..services.certificate_generator import (
 from ..services.dispatch import DispatchBlocked, enqueue_dispatch, process_queue
 from ..services.dispatch.email_sender import send_test_email, verify_job_sig
 from ..services.dispatch.whatsapp_sender import verify_certificate_sig
-from ..services.excel_import import import_depot_workbook, load_depot_sheet
+from ..services.excel_import import (
+    import_challan_file,
+    import_depot_workbook,
+    load_depot_sheet,
+)
 from ..services.numbering import get_numbering_config
 from ..services.validation import check_certificate
 
@@ -116,6 +123,50 @@ def upload_depot(file: UploadFile = File(...), db: Session = Depends(get_db)):
 @router.get("/import/batches", response_model=list[ImportBatchOut])
 def list_batches(db: Session = Depends(get_db)):
     return db.query(ImportBatch).order_by(ImportBatch.created_at.desc()).limit(50).all()
+
+
+@router.post("/import/challan")
+def upload_challan(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Challan upload: auto-fills challan no/date/amount + adjusted bill/TDS/VDS
+    on matching transactions. Returns the affected rows for manual override
+    via PATCH /transactions/{id}."""
+    if not (file.filename or "").lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(422, "Upload an .xlsx or .xls workbook")
+    path = _save_upload(file)
+    try:
+        batch, updated_ids = import_challan_file(db, path, file.filename or "upload.xlsx")
+        updated = (
+            db.query(Transaction).filter(Transaction.id.in_(updated_ids)).all()
+            if updated_ids else []
+        )
+        out = ImportBatchOut.model_validate(batch).model_dump()
+        out["updated_transactions"] = [
+            TransactionOut.model_validate(t).model_dump() for t in updated
+        ]
+        return out
+    except (BadZipFile, ValueError) as e:
+        db.rollback()
+        raise HTTPException(422, f"Could not read workbook: {e}")
+    except Exception as e:  # noqa: BLE001 - keep upload failures user-readable
+        db.rollback()
+        raise HTTPException(422, f"Could not import workbook: {e}")
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+@router.patch("/transactions/{transaction_id}", response_model=TransactionOut)
+def adjust_transaction(transaction_id: int, body: TransactionAdjust, db: Session = Depends(get_db)):
+    """Manual override of auto-filled challan/amount fields after a challan
+    upload (item 7 requirement: allow manual override after auto-fill)."""
+    txn = db.get(Transaction, transaction_id)
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(txn, field, value)
+    db.commit()
+    db.refresh(txn)
+    return txn
 
 
 # ---------------------------------------------------------- Certificates ----
@@ -324,6 +375,33 @@ def dispatch_jobs(certificate_id: int | None = None, db: Session = Depends(get_d
 
 
 # -------------------------------------------------------------- Suppliers ----
+@router.post("/suppliers", response_model=SupplierOut)
+def onboard_supplier(body: SupplierCreate, db: Session = Depends(get_db)):
+    """Vendor onboarding: Company Name, Address, TIN, BIN, Email, WhatsApp
+    are all mandatory (enforced by SupplierCreate's validators). Upserts by
+    TIN, mirroring the dedup convention the Excel importer already uses."""
+    sup = db.query(Supplier).filter(Supplier.tin == body.tin).first()
+    if sup:
+        sup.name = body.name
+        sup.address = body.address
+        sup.bin = body.bin
+    else:
+        sup = Supplier(tin=body.tin, name=body.name, address=body.address, bin=body.bin)
+        db.add(sup)
+        db.flush()
+
+    for kind, value in ((ContactKind.EMAIL, body.email), (ContactKind.WHATSAPP, body.whatsapp)):
+        existing = next((c for c in sup.contacts if c.kind == kind), None)
+        if existing:
+            existing.value = value
+            existing.is_primary = True
+        else:
+            sup.contacts.append(SupplierContact(kind=kind, value=value, is_primary=True))
+    db.commit()
+    db.refresh(sup)
+    return sup
+
+
 @router.get("/suppliers", response_model=list[SupplierOut])
 def list_suppliers(q: str | None = None, db: Session = Depends(get_db)):
     query = db.query(Supplier)
@@ -416,6 +494,38 @@ def get_seal(db: Session = Depends(get_db)):
     if not org.seal_signature_path or not os.path.exists(org.seal_signature_path):
         raise HTTPException(404, "No seal/signature uploaded")
     return FileResponse(org.seal_signature_path)
+
+
+@router.post("/settings/org/signature")
+def upload_signature(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Signature image, separate from the seal image (item 8)."""
+    if file.content_type not in ("image/png", "image/jpeg"):
+        raise HTTPException(422, "Upload a PNG (preferred, supports transparency) or JPEG")
+    return _store_image(db, file, "signature_path", "signature")
+
+
+@router.get("/settings/org/signature")
+def get_signature(db: Session = Depends(get_db)):
+    org = get_org_settings(db)
+    if not org.signature_path or not os.path.exists(org.signature_path):
+        raise HTTPException(404, "No signature uploaded")
+    return FileResponse(org.signature_path)
+
+
+@router.post("/settings/org/seal-image")
+def upload_seal_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Seal image, separate from the signature image (item 8)."""
+    if file.content_type not in ("image/png", "image/jpeg"):
+        raise HTTPException(422, "Upload a PNG (preferred, supports transparency) or JPEG")
+    return _store_image(db, file, "seal_path", "seal")
+
+
+@router.get("/settings/org/seal-image")
+def get_seal_image(db: Session = Depends(get_db)):
+    org = get_org_settings(db)
+    if not org.seal_path or not os.path.exists(org.seal_path):
+        raise HTTPException(404, "No seal uploaded")
+    return FileResponse(org.seal_path)
 
 
 def _store_image(db: Session, file: UploadFile, attr: str, name: str):
