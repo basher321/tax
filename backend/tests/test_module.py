@@ -417,6 +417,72 @@ def test_certificate_image_generated_alongside_pdf(db, company, sample_xlsx):
         assert max(img.size) in range(1700, 1901)  # ~1800px long edge
 
 
+def test_certificate_image_includes_overflow_pages(db, company, tmp_path):
+    """A certificate with enough line items to overflow onto a second PDF
+    page still carries its Seal and Signature block on whichever page the
+    content ends on (normal pagination) — the exported image must include
+    that page too, not silently drop it by only rasterizing page one."""
+    from PIL import Image
+    import fitz
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Depot-SCB"
+    ws.append([None] * len(HEADERS))
+    ws.append([None] * len(HEADERS))
+    ws.append(HEADERS)
+    for i in range(40):
+        ws.append(["Depot", date(2025, 12, 1), f"CHQ{i}", "Bulk Traders", None, None,
+                   None, None, None, None, 10000, 500, None, None, None, None,
+                   "89", "999988887777", f"2526-{i:03d}", "15/01/2026",
+                   1, "December'25", 100000, None])
+    path = tmp_path / "bulk.xlsx"
+    wb.save(path)
+
+    import_depot_workbook(db, str(path), "bulk.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "999988887777", "2025-26")
+
+    with fitz.open(cert.pdf_path) as pdf:
+        page_count = len(pdf)
+    assert page_count > 1, "test setup should force real overflow to prove the fix"
+
+    with Image.open(cert.image_path) as img:
+        assert img.format == "JPEG"
+        # Stacked multi-page image is taller than a single A4 page's
+        # rendered aspect ratio (297/210 ≈ 1.41) would allow.
+        assert img.height / img.width > (297 / 210) * (page_count - 0.5)
+
+
+def test_certificate_image_route_self_heals_missing_image(db, company, sample_xlsx):
+    """Certificates generated before the image-export feature existed have
+    a PDF but no image yet — the download route rasterizes one on first
+    request instead of 404ing, so the on-screen preview (which now shows
+    this same image, not a separate HTML re-implementation) never breaks
+    for older certificates."""
+    from app.main import app
+    from app.database import get_db
+
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "444455556666", "2025-26")
+    assert cert.image_path  # generated normally the first time
+    old_image_path = cert.image_path
+    cert.image_path = None  # simulate a pre-existing certificate
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        client = TestClient(app)
+        resp = client.get(f"/api/certificates/{cert.id}/image")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/jpeg"
+        db.refresh(cert)
+        assert cert.image_path and os.path.exists(cert.image_path)
+    finally:
+        app.dependency_overrides.clear()
+        if os.path.exists(old_image_path):
+            os.remove(old_image_path)
+
+
 # ------------------------------------------------ Offline dispatch ----------
 def test_offline_queue_blocks_then_overrides_then_drains(db, company, sample_xlsx, monkeypatch):
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)

@@ -52,17 +52,18 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (
-    BaseDocTemplate, Frame, FrameBreak, HRFlowable, PageTemplate, Paragraph,
-    Spacer, Table, TableStyle, Image as RLImage,
+    BaseDocTemplate, Frame, FrameBreak, HRFlowable, KeepTogether, PageTemplate,
+    Paragraph, Spacer, Table, TableStyle, Image as RLImage,
 )
 from reportlab.lib.utils import ImageReader
 
 from ..config import get_settings
 from ..models.entities import Signature
 
-# Fixed height reserved for the bottom-pinned footer frame (signature row +
-# officer/seal block + optional letterhead footer image).
-_FOOTER_H = 70 * mm
+# Fixed height reserved for the bottom-pinned footer frame — just the Seal
+# and Signature block now, sized to reclaim page height for Section 06/07
+# rows (fewer line items overflow onto a second page before it's needed).
+_FOOTER_H = 52 * mm
 
 
 def _fitted_image(path: str, max_w_mm: float, max_h_mm: float) -> "RLImage | None":
@@ -97,22 +98,57 @@ _SHARE_IMAGE_LONG_EDGE_PX = 1800
 _SHARE_IMAGE_JPEG_QUALITY = 88
 
 
-def _export_share_image(pdf_path: str, out_path: str) -> None:
-    """Rasterize the just-built PDF's first page into a JPEG — from the
-    same PDF file, not a second independent render, so it is pixel-for-
-    pixel identical to the PDF (same fonts, same layout, same right-aligned
-    Seal and Signature block)."""
+def export_certificate_image(pdf_path: str, out_path: str) -> None:
+    """Rasterize a certificate PDF into a JPEG — from the PDF file itself,
+    not a second independent render, so it is pixel-for-pixel identical to
+    the PDF (same fonts, same layout, same right-aligned Seal and Signature
+    block). Also used to self-heal certificates generated before this
+    feature existed and have no image yet.
+
+    An unusually large certificate (many Section 06/07 rows) can overflow
+    onto a second PDF page — the bottom-pinned footer frame then correctly
+    follows onto whichever page the content ends on, per normal pagination.
+    Every page is rasterized and stacked vertically here so the Seal and
+    Signature block is never silently dropped just because it landed on
+    page 2 rather than page 1."""
+    import io
     import fitz  # local import: only this one call needs it
+    from PIL import Image
 
     doc = fitz.open(pdf_path)
     try:
-        page = doc[0]
-        long_edge_pt = max(page.rect.width, page.rect.height)
+        long_edge_pt = max(doc[0].rect.width, doc[0].rect.height)
         zoom = _SHARE_IMAGE_LONG_EDGE_PX / long_edge_pt
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-        pix.save(out_path, jpg_quality=_SHARE_IMAGE_JPEG_QUALITY)
+        matrix = fitz.Matrix(zoom, zoom)
+        page_images = [
+            Image.open(io.BytesIO(page.get_pixmap(matrix=matrix).tobytes("png"))).convert("RGB")
+            for page in doc
+        ]
     finally:
         doc.close()
+
+    if len(page_images) == 1:
+        combined = page_images[0]
+    else:
+        width = max(img.width for img in page_images)
+        combined = Image.new("RGB", (width, sum(img.height for img in page_images)), "white")
+        y = 0
+        for img in page_images:
+            combined.paste(img, (0, y))
+            y += img.height
+
+    combined.save(out_path, "JPEG", quality=_SHARE_IMAGE_JPEG_QUALITY)
+
+
+def image_path_for_certificate(cert, settings=None) -> str:
+    """Where a certificate's share image lives (or will live) on disk —
+    shared by the renderer and the self-healing fallback in the image
+    download route so both agree on the same path."""
+    settings = settings or get_settings()
+    image_dir = os.path.join(settings.storage_dir, "certificate-images")
+    os.makedirs(image_dir, exist_ok=True)
+    safe_no = (cert.certificate_no or f"cert-{cert.id}").replace("/", "_")
+    return os.path.join(image_dir, f"{safe_no}.jpg")
 
 
 def _fmt_date(d: date | None) -> str:
@@ -348,7 +384,12 @@ def render_certificate_pdf(db, cert) -> str:
         ("TOPPADDING", (0, 0), (-1, -1), 1.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
     ]))
-    story.append(s6)
+    # KeepTogether: the Remarks column is SPANned down the whole table, and
+    # ReportLab's row-splitter can't cleanly split a table mid-span (it
+    # crashes trying to compute row heights across the break). Keeping the
+    # table atomic pushes it whole onto the next page instead, which also
+    # means the table itself is never cut mid-row across a page boundary.
+    story.append(KeepTogether([s6]))
     story.append(Spacer(1, 5 * mm))
 
     # ---------- Section 07 ---------------------------------------------------
@@ -399,7 +440,7 @@ def render_certificate_pdf(db, cert) -> str:
         ("TOPPADDING", (0, 0), (-1, -1), 1.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
     ]))
-    story.append(s7)
+    story.append(KeepTogether([s7]))  # same SPAN-vs-split issue as Section 06
     story.append(Spacer(1, 4 * mm))
 
     # ---------- Amount in words + certification ------------------------------
@@ -479,10 +520,8 @@ def render_certificate_pdf(db, cert) -> str:
 
     # Share-ready image (WhatsApp/email), rasterized from this same PDF so
     # it's guaranteed to match it exactly.
-    image_dir = os.path.join(settings.storage_dir, "certificate-images")
-    os.makedirs(image_dir, exist_ok=True)
-    image_path = os.path.join(image_dir, f"{safe_no}.jpg")
-    _export_share_image(path, image_path)
+    image_path = image_path_for_certificate(cert, settings)
+    export_certificate_image(path, image_path)
     cert.image_path = image_path
 
     return path

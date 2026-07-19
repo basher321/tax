@@ -4,15 +4,6 @@ import { useCompany } from "../context/CompanyContext.jsx";
 
 const fmt = (n) => (n == null ? "" : Number(n).toLocaleString());
 
-const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December"];
-// "DD Month YYYY", e.g. "14 March 2025" — bottom-section Seal/Signature date only.
-const fmtDateLong = (isoDate) => {
-  if (!isoDate) return "";
-  const [y, m, d] = isoDate.split("-").map(Number);
-  return `${String(d).padStart(2, "0")} ${MONTH_NAMES[m - 1]} ${y}`;
-};
-
 const normalizeAnomalies = (items) =>
   Array.isArray(items)
     ? items.map((a) => ({
@@ -49,11 +40,10 @@ function Preview({ certId, onClose }) {
   const [emailBusy, setEmailBusy] = useState(false);
   const [dateMode, setDateMode] = useState("auto");
   const [manualDate, setManualDate] = useState("");
-  const [headerOk, setHeaderOk] = useState(true);
-  const [footerOk, setFooterOk] = useState(true);
-  const [sealOk, setSealOk] = useState(true);
-  const [sigImgOk, setSigImgOk] = useState(true);
-  const [signature, setSignature] = useState(null);
+  // Cache-busts the certificate image below every time the server re-renders
+  // it, so edits (Remarks/TIN/date) are reflected immediately instead of
+  // showing a browser-cached copy of the old image at the same URL.
+  const [imgVersion, setImgVersion] = useState(0);
 
   const showNotice = (message, kind = "ok") => {
     setNotice(message);
@@ -80,35 +70,23 @@ function Preview({ certId, onClose }) {
         setCert(c); setRemarks(c.remarks || ""); setAnomalies(a); setWaLinks(wa);
         setDateMode(c.issue_date_mode || "auto");
         setManualDate(c.issue_date || "");
+        setImgVersion((v) => v + 1);
       }
     );
   useEffect(() => { load(); }, [certId]);
 
-  // The Seal and Signature block shows one signature — the first enabled
-  // one (alphabetical by name) for this certificate's own company — same
-  // source and selection the PDF uses.
-  useEffect(() => {
-    if (!cert) return;
-    setSealOk(true);
-    setSigImgOk(true);
-    api.listSignatures(cert.company_id)
-      .then((list) => {
-        const enabled = list.filter((s) => s.enabled).sort((a, b) => a.name.localeCompare(b.name));
-        setSignature(enabled[0] || null);
-      })
-      .catch(() => setSignature(null));
-  }, [cert?.company_id]);
-
   async function saveRemarks() {
     const c = await api.updateRemarks(certId, remarks);
     setCert(c);
-    showNotice("Remarks saved - PDF re-rendered.");
+    setImgVersion((v) => v + 1);
+    showNotice("Remarks saved - certificate re-rendered.");
   }
 
   async function setTinStatus(has12DigitTin) {
     const c = await api.updateTinStatus(certId, has12DigitTin);
     setCert(c);
-    showNotice("TIN status saved - PDF re-rendered.");
+    setImgVersion((v) => v + 1);
+    showNotice("TIN status saved - certificate re-rendered.");
   }
 
   async function saveIssueDate() {
@@ -119,7 +97,8 @@ function Preview({ certId, onClose }) {
     const c = await api.updateIssueDate(certId, dateMode, dateMode === "manual" ? manualDate : null);
     setCert(c);
     setManualDate(c.issue_date || "");
-    showNotice("Issue date saved - PDF re-rendered.");
+    setImgVersion((v) => v + 1);
+    showNotice("Issue date saved - certificate re-rendered.");
   }
 
   async function sendEmail() {
@@ -273,132 +252,36 @@ function Preview({ certId, onClose }) {
           </div>
         )}
 
-        {/* Fixed certificate layout - mirrors certificate_format.jpeg (and
-            the PDF's full-bleed letterhead banners: edge-to-edge at the
-            page's own width, never inset within the body's padding — a
-            letterhead image with side margins reads as "floating in the
-            middle" instead of a proper full-bleed banner). Everything is
-            read-only except Remarks and the date-mode below. */}
-        {headerOk && (
-          <img
-            src={api.letterheadHeaderUrl(cert.company_id)}
-            alt="" className="w-full h-auto block"
-            onError={() => setHeaderOk(false)}
-          />
-        )}
-        <div className="p-6 text-sm">
-          <h2 className="text-center font-semibold text-[15px] tracking-tight">Certificate of Deduction of Tax</h2>
-          <p className="text-center text-xs text-ink/50 mt-0.5">[Section 145 of the Income Tax Act 2023]</p>
-          <hr className="border-t border-ink/20 mt-2.5 mb-3" />
-
-          <div className="flex justify-between border border-ink px-2 py-1 font-medium">
-            <span>No. {cert.certificate_no}</span>
-            <span>{cert.issue_date}</span>
-          </div>
-
-          <table className="w-full border border-ink mt-2 [&_td]:border [&_td]:border-ink [&_td]:px-2 [&_td]:py-1">
-            <tbody>
-              <tr><td className="w-6">1</td><td className="font-medium w-64">Name of Payee:</td><td colSpan={2}>{cert.supplier.name}</td></tr>
-              <tr><td>2</td><td className="font-medium">Address of Payee:</td><td colSpan={2}>{cert.supplier.address || ""}</td></tr>
-              <tr><td>3</td><td>Does the person have a Twelve-digit TIN?</td>
-                <td>
-                  <label className="cursor-pointer">
-                    <input type="radio" name="has12DigitTin" className="mr-1"
-                      checked={cert.has_12_digit_tin === true}
-                      onChange={() => setTinStatus(true)} />
-                    Yes
-                  </label>
-                </td>
-                <td>
-                  <label className="cursor-pointer">
-                    <input type="radio" name="has12DigitTin" className="mr-1"
-                      checked={cert.has_12_digit_tin === false}
-                      onChange={() => setTinStatus(false)} />
-                    No
-                  </label>
-                </td>
-              </tr>
-              <tr><td>4</td><td>Twelve-digit TIN (if answer of 03 is Yes)</td><td className="font-mono" colSpan={2}>E-TIN&nbsp;&nbsp;{cert.tin}</td></tr>
-              <tr><td>5</td><td>Period for which payment is made From (date) to (date)</td>
-                <td colSpan={2}>From {cert.period_from} to {cert.period_to}</td></tr>
-            </tbody>
-          </table>
-
-          <p className="font-medium mt-4">06. Particulars of the making of payment and the deduction of tax</p>
-          <table className="w-full border border-ink mt-1 [&_td]:border [&_th]:border [&_td]:border-ink [&_th]:border-ink [&_td]:px-2 [&_th]:px-2 [&_td]:py-0.5 [&_th]:py-1">
-            <thead className="bg-paper text-xs">
-              <tr><th>Sl</th><th>Date of Payment</th><th>Description of payment</th><th>Section</th>
-                <th>Amount of payment</th><th>Amount of tax deducted</th><th>Remarks</th></tr>
-            </thead>
-            <tbody>
-              {cert.lines.map((l, idx) => (
-                <tr key={l.sl}>
-                  <td className="text-center">{l.sl}</td>
-                  <td className="text-center">{l.date_of_payment}</td>
-                  <td>{l.description}</td>
-                  <td className="text-center">{l.section}</td>
-                  <td className="text-right font-mono">{fmt(l.amount_of_payment)}</td>
-                  <td className="text-right font-mono">{fmt(l.amount_of_tax_deducted)}</td>
-                  {idx === 0 && (
-                    <td rowSpan={cert.lines.length} className="align-top">
-                      {cert.remarks}
-                    </td>
-                  )}
-                </tr>
-              ))}
-              <tr className="font-semibold">
-                <td colSpan={4} className="text-center">Total</td>
-                <td className="text-right font-mono">{fmt(cert.total_payment)}</td>
-                <td className="text-right font-mono">{fmt(cert.total_tax_deducted)}</td>
-                <td />
-              </tr>
-            </tbody>
-          </table>
-
-          <p className="font-medium mt-4">07. Payment of deducted tax to the credit of the Government</p>
-          <table className="w-full border border-ink mt-1 [&_td]:border [&_th]:border [&_td]:border-ink [&_th]:border-ink [&_td]:px-2 [&_th]:px-2 [&_td]:py-0.5 [&_th]:py-1">
-            <thead className="bg-paper text-xs">
-              <tr><th>Sl</th><th>Challan Number</th><th>Challan date</th><th>Bank Name</th>
-                <th>Total amount in the challan</th><th>Amount relating to this certificate</th><th>Remarks</th></tr>
-            </thead>
-            <tbody>
-              {cert.challan_lines.map((l, idx) => (
-                <tr key={l.sl}>
-                  <td className="text-center">{l.sl}</td>
-                  <td className="font-mono">{l.challan_number}</td>
-                  <td className="text-center">{l.challan_date}</td>
-                  <td>{l.bank_name}</td>
-                  <td className="text-right font-mono">{fmt(l.total_challan_amount)}</td>
-                  <td className="text-right font-mono">{fmt(l.amount_related)}</td>
-                  {idx === 0 && (
-                    <td rowSpan={cert.challan_lines.length} className="align-top">
-                      {cert.remarks}
-                    </td>
-                  )}
-                </tr>
-              ))}
-              <tr className="font-semibold">
-                <td colSpan={5} className="text-center">Total</td>
-                <td className="text-right font-mono">{fmt(cert.total_tax_deducted)}</td>
-                <td />
-              </tr>
-            </tbody>
-          </table>
-
-          <p className="mt-3"><span className="font-medium">Amount In word:</span> {cert.amount_in_words}</p>
-          <p className="text-ink/70">Certified that the information given above is correct and complete.</p>
-
-          {/* Editable fields: Remarks (Text Editable in the template) and the
-              issue-date mode (Automatic vs. Manual), both saved before Send. */}
-          <div className="mt-4">
+        {/* Editable certificate fields, kept separate from the certificate
+            image below — that image is the exact same PDF used for Print,
+            WhatsApp sharing, and email attachment, so it can't contain
+            interactive controls. Saving here re-renders that PDF/image
+            immediately (see setImgVersion calls). */}
+        <div className="mx-5 mt-3 card p-4 space-y-4 text-sm">
+          <h3 className="font-medium">Edit certificate details</h3>
+          <div>
             <label className="label">Remarks (the only editable table field)</label>
             <div className="flex gap-2">
               <input className="input" value={remarks} onChange={(e) => setRemarks(e.target.value)} />
               <button className="btn-primary" onClick={saveRemarks}>Save remarks</button>
             </div>
           </div>
-
-          <div className="mt-4">
+          <div>
+            <label className="label">Does the payee have a Twelve-digit TIN?</label>
+            <div className="flex items-center gap-4">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="has12DigitTin" checked={cert.has_12_digit_tin === true}
+                  onChange={() => setTinStatus(true)} />
+                Yes
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="has12DigitTin" checked={cert.has_12_digit_tin === false}
+                  onChange={() => setTinStatus(false)} />
+                No
+              </label>
+            </div>
+          </div>
+          <div>
             <label className="label">Issue date</label>
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-1.5 cursor-pointer">
@@ -418,52 +301,17 @@ function Preview({ certId, onClose }) {
               <button className="btn-ghost" onClick={saveIssueDate}>Save date</button>
             </div>
           </div>
-
-          {/* Footer: mirrors the PDF layout exactly — one "Seal and
-              Signature" unit, flush against the right margin (the same
-              distance from the right edge as the body content's left
-              edge), stacked top to bottom: signature image, the label,
-              the issue date (DD Month YYYY), then the seal image directly
-              below the date, centered on each other within the block's
-              own width. A labeled placeholder box stands in for either
-              image if it isn't configured yet. */}
-          <div className="mt-6 pt-3 border-t border-ink flex justify-end">
-            <div className="w-48 flex flex-col items-center text-center">
-              {signature && sigImgOk ? (
-                <img
-                  src={api.signatureImageUrl(cert.company_id, signature.id)}
-                  alt={`${signature.name} signature`}
-                  className="h-10 object-contain"
-                  onError={() => setSigImgOk(false)}
-                />
-              ) : (
-                <div className="w-28 h-10 border border-dashed border-ink/30 text-ink/40 text-[10px] flex items-center justify-center">
-                  Signature
-                </div>
-              )}
-              <p className="text-xs font-semibold mt-1.5">Seal and Signature</p>
-              <p className="text-xs">{fmtDateLong(cert.issue_date)}</p>
-              {sealOk ? (
-                <img
-                  src={api.companySealUrl(cert.company_id)}
-                  alt="" className="h-10 mt-1.5 object-contain"
-                  onError={() => setSealOk(false)}
-                />
-              ) : (
-                <div className="w-20 h-10 mt-1.5 border border-dashed border-ink/30 text-ink/40 text-[10px] flex items-center justify-center">
-                  Seal
-                </div>
-              )}
-            </div>
-          </div>
         </div>
-        {footerOk && (
-          <img
-            src={api.letterheadFooterUrl(cert.company_id)}
-            alt="" className="w-full h-auto block rounded-b-lg"
-            onError={() => setFooterOk(false)}
-          />
-        )}
+
+        {/* The certificate itself: the exact image rasterized from the same
+            PDF used for Print, WhatsApp sharing, and email attachment — not
+            a separate HTML re-implementation — so this is guaranteed
+            pixel-identical to every exported/printed/shared format. */}
+        <img
+          src={`${api.certificateImageUrl(cert.id)}?v=${imgVersion}`}
+          alt={`Certificate ${cert.certificate_no}`}
+          className="w-full h-auto block mt-3 rounded-b-lg"
+        />
       </div>
     </div>
   );

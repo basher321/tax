@@ -78,6 +78,7 @@ from ..services.dispatch import DispatchBlocked, enqueue_dispatch, process_queue
 from ..services.dispatch.email_sender import send_test_email, verify_job_sig
 from ..services.dispatch.whatsapp_sender import verify_certificate_sig
 from ..services.excel_export import export_certificates_to_excel
+from ..services.pdf_renderer import render_certificate_pdf
 from ..services.excel_import import (
     import_depot_workbook,
     load_depot_sheet,
@@ -436,10 +437,19 @@ def download_pdf(cert_id: int, db: Session = Depends(get_db)):
 
 @router.get("/certificates/{cert_id}/image")
 def download_certificate_image(cert_id: int, db: Session = Depends(get_db)):
-    """Serves the share-ready JPEG (WhatsApp/email) rasterized from the
-    same PDF — pixel-identical to it, not a separate render."""
+    """Serves the share-ready JPEG (WhatsApp/email/on-screen preview)
+    rasterized from the same PDF — pixel-identical to it, not a separate
+    render. Self-heals certificates with no image yet by fully re-rendering
+    them with the current template — not just rasterizing whatever PDF
+    happens to be on disk, which could predate a layout change and would
+    otherwise silently reproduce a stale design."""
     cert = db.get(Certificate, cert_id)
-    if not cert or not cert.image_path or not os.path.exists(cert.image_path):
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+    if not cert.image_path or not os.path.exists(cert.image_path):
+        cert.pdf_path = render_certificate_pdf(db, cert)
+        db.commit()
+    if not cert.image_path or not os.path.exists(cert.image_path):
         raise HTTPException(404, "Certificate image not found")
     return FileResponse(cert.image_path, media_type="image/jpeg",
                         filename=os.path.basename(cert.image_path))
