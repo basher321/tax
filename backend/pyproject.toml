@@ -1,0 +1,6 @@
+[tool.vercel]
+# Vercel's Python runtime auto-detects a FastAPI entrypoint in a handful of
+# default locations (api/index.py, main.py, etc.); ours lives at app/main.py
+# relative to this backend/ directory (set as the Vercel project's Root
+# Directory), so it needs to be told explicitly.
+entrypoint = "app.main:app"

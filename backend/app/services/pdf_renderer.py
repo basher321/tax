@@ -39,11 +39,17 @@ No company/certificate logo is rendered anywhere in this template — that
 feature has been removed. No runtime configuration of this layout is
 exposed anywhere.
 
-Alongside the PDF, a share-ready JPEG (Certificate.image_path) is rasterized
-from that same PDF file on every (re)generation — not a second independent
-render — so on-screen PDF, print, WhatsApp, and email image sharing all
+Alongside the PDF, a share-ready JPEG (Certificate.image_data) is rasterized
+from that same PDF on every (re)generation — not a second independent
+render — so on-screen view, print, WhatsApp, and email image sharing all
 trace back to one source layout and stay pixel-identical to each other.
+
+Every image (uploaded letterhead/seal/signature, generated PDF, generated
+share image) is handled as in-memory bytes and stored in the database, never
+written to local disk — this backend runs on stateless/serverless hosting
+(e.g. Vercel), where each request can get a fresh, empty filesystem.
 """
+import io
 import os
 from datetime import date
 
@@ -57,7 +63,6 @@ from reportlab.platypus import (
 )
 from reportlab.lib.utils import ImageReader
 
-from ..config import get_settings
 from ..models.entities import Signature
 
 # Fixed height reserved for the bottom-pinned footer frame — just the Seal
@@ -66,16 +71,18 @@ from ..models.entities import Signature
 _FOOTER_H = 52 * mm
 
 
-def _fitted_image(path: str, max_w_mm: float, max_h_mm: float) -> "RLImage | None":
+def _fitted_image(data: bytes | None, max_w_mm: float, max_h_mm: float) -> "RLImage | None":
     """Scale an uploaded image into a box without stretching it."""
+    if not data:
+        return None
     try:
-        iw, ih = ImageReader(path).getSize()
+        iw, ih = ImageReader(io.BytesIO(data)).getSize()
     except Exception:
         return None
     if not iw or not ih:
         return None
     scale = min((max_w_mm * mm) / iw, (max_h_mm * mm) / ih)
-    return RLImage(path, width=iw * scale, height=ih * scale)
+    return RLImage(io.BytesIO(data), width=iw * scale, height=ih * scale)
 
 
 _BASE = "Helvetica"
@@ -98,12 +105,11 @@ _SHARE_IMAGE_LONG_EDGE_PX = 1800
 _SHARE_IMAGE_JPEG_QUALITY = 88
 
 
-def export_certificate_image(pdf_path: str, out_path: str) -> None:
-    """Rasterize a certificate PDF into a JPEG — from the PDF file itself,
+def export_certificate_image(pdf_bytes: bytes) -> bytes:
+    """Rasterize a certificate PDF into JPEG bytes — from the PDF itself,
     not a second independent render, so it is pixel-for-pixel identical to
     the PDF (same fonts, same layout, same right-aligned Seal and Signature
-    block). Also used to self-heal certificates generated before this
-    feature existed and have no image yet.
+    block). Also used to self-heal certificates that have no image yet.
 
     An unusually large certificate (many Section 06/07 rows) can overflow
     onto a second PDF page — the bottom-pinned footer frame then correctly
@@ -111,11 +117,10 @@ def export_certificate_image(pdf_path: str, out_path: str) -> None:
     Every page is rasterized and stacked vertically here so the Seal and
     Signature block is never silently dropped just because it landed on
     page 2 rather than page 1."""
-    import io
     import fitz  # local import: only this one call needs it
     from PIL import Image
 
-    doc = fitz.open(pdf_path)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         long_edge_pt = max(doc[0].rect.width, doc[0].rect.height)
         zoom = _SHARE_IMAGE_LONG_EDGE_PX / long_edge_pt
@@ -137,18 +142,9 @@ def export_certificate_image(pdf_path: str, out_path: str) -> None:
             combined.paste(img, (0, y))
             y += img.height
 
-    combined.save(out_path, "JPEG", quality=_SHARE_IMAGE_JPEG_QUALITY)
-
-
-def image_path_for_certificate(cert, settings=None) -> str:
-    """Where a certificate's share image lives (or will live) on disk —
-    shared by the renderer and the self-healing fallback in the image
-    download route so both agree on the same path."""
-    settings = settings or get_settings()
-    image_dir = os.path.join(settings.storage_dir, "certificate-images")
-    os.makedirs(image_dir, exist_ok=True)
-    safe_no = (cert.certificate_no or f"cert-{cert.id}").replace("/", "_")
-    return os.path.join(image_dir, f"{safe_no}.jpg")
+    out = io.BytesIO()
+    combined.save(out, "JPEG", quality=_SHARE_IMAGE_JPEG_QUALITY)
+    return out.getvalue()
 
 
 def _fmt_date(d: date | None) -> str:
@@ -196,14 +192,16 @@ def _placeholder_box(label: str, w_mm: float, h_mm: float) -> Table:
 _MAX_BLEED_H = 55 * mm  # letterhead banners never eat more than this much page height
 
 
-def _bleed_box(path: str, page_w: float) -> tuple[float, float, float] | None:
+def _bleed_box(data: bytes | None, page_w: float) -> tuple[float, float, float] | None:
     """Full-bleed placement for a letterhead banner: spans the entire
     physical page width edge-to-edge (like real branded stationery — no
     content margin on the sides), at its natural aspect ratio, capped to
-    _MAX_BLEED_H. Returns (x, width, height) in points, or None if the
-    image can't be read."""
+    _MAX_BLEED_H. Returns (x, width, height) in points, or None if there's
+    no image or it can't be read."""
+    if not data:
+        return None
     try:
-        iw, ih = ImageReader(path).getSize()
+        iw, ih = ImageReader(io.BytesIO(data)).getSize()
     except Exception:
         return None
     if not iw or not ih:
@@ -217,28 +215,21 @@ def _bleed_box(path: str, page_w: float) -> tuple[float, float, float] | None:
     return (page_w - width) / 2, width, _MAX_BLEED_H
 
 
-def render_certificate_pdf(db, cert) -> str:
-    """Render a Certificate ORM object (with lines loaded) to PDF; returns path."""
+def render_certificate_pdf(db, cert) -> None:
+    """Render a Certificate ORM object (with lines loaded) to PDF bytes and
+    a rasterized share image, storing both directly on the cert (does not
+    commit — callers are already responsible for that)."""
     from .certificate_generator import get_org_settings  # local import: no cycle at import time
 
-    settings = get_settings()
     org = get_org_settings(db)
     company = cert.company
-    out_dir = os.path.join(settings.storage_dir, "certificates")
-    os.makedirs(out_dir, exist_ok=True)
-    safe_no = (cert.certificate_no or f"cert-{cert.id}").replace("/", "_")
-    path = os.path.join(out_dir, f"{safe_no}.pdf")
 
     page_w, page_h = A4
 
-    header_path = (company.letterhead_header_path
-                  if company and company.letterhead_header_path
-                  and os.path.exists(company.letterhead_header_path) else None)
-    footer_path = (company.letterhead_footer_path
-                  if company and company.letterhead_footer_path
-                  and os.path.exists(company.letterhead_footer_path) else None)
-    header_box = _bleed_box(header_path, page_w) if header_path else None
-    footer_box = _bleed_box(footer_path, page_w) if footer_path else None
+    header_data = company.letterhead_header_data if company else None
+    footer_data = company.letterhead_footer_data if company else None
+    header_box = _bleed_box(header_data, page_w)
+    footer_box = _bleed_box(footer_data, page_w)
     # A small gap between the bleed banner and the margin-bound body content,
     # so text never sits flush against the artwork's edge.
     header_reserve = (header_box[2] + 3 * mm) if header_box else 0
@@ -248,16 +239,17 @@ def render_certificate_pdf(db, cert) -> str:
         canvas.saveState()
         if header_box:
             x, w, h = header_box
-            canvas.drawImage(header_path, x, page_h - h, width=w, height=h,
+            canvas.drawImage(ImageReader(io.BytesIO(header_data)), x, page_h - h, width=w, height=h,
                              preserveAspectRatio=True, anchor="n", mask="auto")
         if footer_box:
             x, w, h = footer_box
-            canvas.drawImage(footer_path, x, 0, width=w, height=h,
+            canvas.drawImage(ImageReader(io.BytesIO(footer_data)), x, 0, width=w, height=h,
                              preserveAspectRatio=True, anchor="s", mask="auto")
         canvas.restoreState()
 
+    buf = io.BytesIO()
     doc = BaseDocTemplate(
-        path, pagesize=A4,
+        buf, pagesize=A4,
         leftMargin=12 * mm, rightMargin=12 * mm,
         topMargin=10 * mm, bottomMargin=10 * mm,
         title=f"Certificate of Deduction of Tax {cert.certificate_no}",
@@ -473,18 +465,16 @@ def render_certificate_pdf(db, cert) -> str:
     # Seal resolution: this cert's own company, else the legacy OrgSettings
     # field, else (only if nothing at all is configured) the old combined
     # seal+signature image kept for backwards compatibility.
-    seal_path = None
-    if company and company.seal_path and os.path.exists(company.seal_path):
-        seal_path = company.seal_path
-    elif org.seal_path and os.path.exists(org.seal_path):
-        seal_path = org.seal_path
-    elif not signature and org.seal_signature_path and os.path.exists(org.seal_signature_path):
-        seal_path = org.seal_signature_path
+    seal_data = None
+    if company and company.seal_data:
+        seal_data = company.seal_data
+    elif org.seal_data:
+        seal_data = org.seal_data
+    elif not signature and org.seal_signature_data:
+        seal_data = org.seal_signature_data
 
     block = []
-    sig_img = (_fitted_image(signature.image_path, 40, 16)
-              if signature and signature.image_path and os.path.exists(signature.image_path)
-              else None)
+    sig_img = _fitted_image(signature.image_data, 40, 16) if signature else None
     if sig_img is not None:
         sig_img.hAlign = "CENTER"
         block.append(sig_img)
@@ -494,7 +484,7 @@ def render_certificate_pdf(db, cert) -> str:
     block.append(Paragraph("<b>Seal and Signature</b>", P_CENTER_B))
     block.append(Paragraph(_fmt_date_long(cert.issue_date), P_CENTER))
     block.append(Spacer(1, 1.5 * mm))
-    seal_img = _fitted_image(seal_path, 30, 16) if seal_path else None
+    seal_img = _fitted_image(seal_data, 30, 16)
     if seal_img is not None:
         seal_img.hAlign = "CENTER"
         block.append(seal_img)
@@ -518,10 +508,7 @@ def render_certificate_pdf(db, cert) -> str:
 
     doc.build(story)
 
-    # Share-ready image (WhatsApp/email), rasterized from this same PDF so
-    # it's guaranteed to match it exactly.
-    image_path = image_path_for_certificate(cert, settings)
-    export_certificate_image(path, image_path)
-    cert.image_path = image_path
-
-    return path
+    cert.pdf_data = buf.getvalue()
+    # Share-ready image (WhatsApp/email/on-screen preview), rasterized from
+    # this same PDF so it's guaranteed to match it exactly.
+    cert.image_data = export_certificate_image(cert.pdf_data)

@@ -2,6 +2,7 @@
 aggregation math, concurrent number allocation, anomaly detection, bulk
 anomaly check / bulk send, per-company letterhead resolution, multi-company
 isolation, and offline dispatch queue."""
+import io
 import os
 import smtplib
 import threading
@@ -57,6 +58,12 @@ from app.services.excel_import import (
 from app.services.numbering import allocate_certificate_number, get_numbering_config
 from app.services.pdf_renderer import render_certificate_pdf
 from app.services.validation import check_certificate
+
+_TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 HEADERS = [
     "Category", "Cheque Date", "Cheque Number", "Supplier Name",
@@ -329,7 +336,7 @@ def _make_clean_certificate(db, company, sample_xlsx):
     """Beta Supplies has email+WhatsApp+challan mapped; with company seal and
     officer filled in, its certificate should have zero anomalies."""
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
-    company.seal_path = "/tmp/seal.png"
+    company.seal_data = _TINY_PNG
     company.officer_name, company.officer_designation, company.officer_email = "A", "B", "c@d.com"
     db.commit()
     return generate_certificate(db, company.id, "444455556666", "2025-26")
@@ -368,20 +375,11 @@ def test_bulk_send_dispatches_clean_skips_anomalous(db, company, sample_xlsx, mo
 
 
 # --------------------------------------- Per-company letterhead (item 12) ---
-_TINY_PNG = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
-    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-)
-
-
 def test_letterhead_resolves_per_certificates_own_company(db, company, company2, sample_xlsx, tmp_path):
-    header1 = tmp_path / "header1.png"
-    header2 = tmp_path / "header2.png"
-    header1.write_bytes(_TINY_PNG)
-    header2.write_bytes(_TINY_PNG)
-    company.letterhead_header_path = str(header1)
-    company2.letterhead_header_path = str(header2)
+    header1 = _TINY_PNG
+    header2 = _TINY_PNG + b"\x00"  # distinguishable bytes, still a valid PNG read path
+    company.letterhead_header_data = header1
+    company2.letterhead_header_data = header2
     db.commit()
 
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
@@ -391,11 +389,11 @@ def test_letterhead_resolves_per_certificates_own_company(db, company, company2,
 
     # Each certificate's own company_id resolves to its own letterhead —
     # never cross-contaminated, and render succeeds for both.
-    assert cert1.company.letterhead_header_path == str(header1)
-    assert cert2.company.letterhead_header_path == str(header2)
-    path1 = render_certificate_pdf(db, cert1)
-    path2 = render_certificate_pdf(db, cert2)
-    assert os.path.exists(path1) and os.path.exists(path2)
+    assert cert1.company.letterhead_header_data == header1
+    assert cert2.company.letterhead_header_data == header2
+    render_certificate_pdf(db, cert1)
+    render_certificate_pdf(db, cert2)
+    assert cert1.pdf_data and cert2.pdf_data
 
 
 # --------------------------------- Share-ready certificate image export -----
@@ -408,11 +406,10 @@ def test_certificate_image_generated_alongside_pdf(db, company, sample_xlsx):
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
     cert = generate_certificate(db, company.id, "444455556666", "2025-26")
 
-    assert cert.image_path and os.path.exists(cert.image_path)
-    size_bytes = os.path.getsize(cert.image_path)
-    assert 0 < size_bytes < 2 * 1024 * 1024  # under the 2 MB target
+    assert cert.image_data
+    assert 0 < len(cert.image_data) < 2 * 1024 * 1024  # under the 2 MB target
 
-    with Image.open(cert.image_path) as img:
+    with Image.open(io.BytesIO(cert.image_data)) as img:
         assert img.format == "JPEG"
         assert max(img.size) in range(1700, 1901)  # ~1800px long edge
 
@@ -442,11 +439,11 @@ def test_certificate_image_includes_overflow_pages(db, company, tmp_path):
     import_depot_workbook(db, str(path), "bulk.xlsx", company.id)
     cert = generate_certificate(db, company.id, "999988887777", "2025-26")
 
-    with fitz.open(cert.pdf_path) as pdf:
+    with fitz.open(stream=cert.pdf_data, filetype="pdf") as pdf:
         page_count = len(pdf)
     assert page_count > 1, "test setup should force real overflow to prove the fix"
 
-    with Image.open(cert.image_path) as img:
+    with Image.open(io.BytesIO(cert.image_data)) as img:
         assert img.format == "JPEG"
         # Stacked multi-page image is taller than a single A4 page's
         # rendered aspect ratio (297/210 ≈ 1.41) would allow.
@@ -464,9 +461,8 @@ def test_certificate_image_route_self_heals_missing_image(db, company, sample_xl
 
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
     cert = generate_certificate(db, company.id, "444455556666", "2025-26")
-    assert cert.image_path  # generated normally the first time
-    old_image_path = cert.image_path
-    cert.image_path = None  # simulate a pre-existing certificate
+    assert cert.image_data  # generated normally the first time
+    cert.image_data = None  # simulate a pre-existing certificate
     db.commit()
 
     app.dependency_overrides[get_db] = lambda: db
@@ -476,11 +472,9 @@ def test_certificate_image_route_self_heals_missing_image(db, company, sample_xl
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/jpeg"
         db.refresh(cert)
-        assert cert.image_path and os.path.exists(cert.image_path)
+        assert cert.image_data
     finally:
         app.dependency_overrides.clear()
-        if os.path.exists(old_image_path):
-            os.remove(old_image_path)
 
 
 # ------------------------------------------------ Offline dispatch ----------
@@ -768,35 +762,31 @@ def test_missing_seal_anomaly_satisfied_by_company_seal(db, company, sample_xlsx
     codes = {a.code for a in check_certificate(db, cert, org)}
     assert "MISSING_SEAL" in codes  # no seal uploaded yet
 
-    company.seal_path = "/tmp/seal.png"
+    company.seal_data = _TINY_PNG
     db.commit()
     codes = {a.code for a in check_certificate(db, cert, org)}
     assert "MISSING_SEAL" not in codes
 
 
 # ---------------------------------- Multiple named signatures (items 2/5) ---
-def test_signature_defaults_enabled_and_renders_on_certificate(db, company, sample_xlsx, tmp_path):
-    sig_path = tmp_path / "sig1.png"
-    sig_path.write_bytes(_TINY_PNG)
+def test_signature_defaults_enabled_and_renders_on_certificate(db, company, sample_xlsx):
     sig = Signature(company_id=company.id, name="Md. Rahim Uddin",
-                    designation="Head of Tax & VAT", image_path=str(sig_path))
+                    designation="Head of Tax & VAT", image_data=_TINY_PNG)
     db.add(sig)
     db.commit()
     assert sig.enabled is True  # new signatures default to enabled
 
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
     cert = generate_certificate(db, company.id, "444455556666", "2025-26")
-    path = render_certificate_pdf(db, cert)  # must not raise with a signature row
-    assert os.path.exists(path)
+    render_certificate_pdf(db, cert)  # must not raise with a signature row
+    assert cert.pdf_data
 
 
-def test_disabled_signature_excluded_from_enabled_query(db, company, tmp_path):
+def test_disabled_signature_excluded_from_enabled_query(db, company):
     """Every Signature flagged enabled renders on every certificate for the
     company — disabling one removes it from that set immediately."""
-    sig_path = tmp_path / "sig2.png"
-    sig_path.write_bytes(_TINY_PNG)
-    shown = Signature(company_id=company.id, name="Shown", image_path=str(sig_path))
-    hidden = Signature(company_id=company.id, name="Hidden", image_path=str(sig_path), enabled=False)
+    shown = Signature(company_id=company.id, name="Shown", image_data=_TINY_PNG)
+    hidden = Signature(company_id=company.id, name="Hidden", image_data=_TINY_PNG, enabled=False)
     db.add_all([shown, hidden])
     db.commit()
 
@@ -809,13 +799,11 @@ def test_disabled_signature_excluded_from_enabled_query(db, company, tmp_path):
     assert [s.name for s in visible] == ["Shown"]
 
 
-def test_delete_signature_route(db, company, tmp_path):
+def test_delete_signature_route(db, company):
     from app.main import app
     from app.database import get_db
 
-    sig_path = tmp_path / "sig3.png"
-    sig_path.write_bytes(_TINY_PNG)
-    sig = Signature(company_id=company.id, name="To Delete", image_path=str(sig_path))
+    sig = Signature(company_id=company.id, name="To Delete", image_data=_TINY_PNG)
     db.add(sig)
     db.commit()
     sig_id = sig.id

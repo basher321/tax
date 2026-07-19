@@ -36,9 +36,16 @@ async def _queue_worker():
 async def lifespan(app: FastAPI):
     # Dev convenience; use Alembic migrations in production.
     Base.metadata.create_all(engine)
-    task = asyncio.create_task(_queue_worker())
+    # The background poller only makes sense on a persistent server: on
+    # serverless (Vercel sets VERCEL=1), each invocation is a fresh, isolated
+    # process that doesn't outlive its request, so a background asyncio task
+    # here would never actually run between requests. The offline dispatch
+    # queue still drains on demand via POST /api/dispatch/process — wire a
+    # Vercel Cron Job (or any external scheduler) to call it periodically.
+    task = None if os.environ.get("VERCEL") else asyncio.create_task(_queue_worker())
     yield
-    task.cancel()
+    if task:
+        task.cancel()
 
 
 app = FastAPI(title="Tax Deduction Certificate Module", lifespan=lifespan)

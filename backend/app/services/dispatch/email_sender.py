@@ -8,7 +8,6 @@ Common host presets (surfaced in the Settings UI as a dropdown):
 """
 import hashlib
 import hmac
-import os
 import smtplib
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -80,7 +79,7 @@ def _send_message(org: OrgSettings, msg: EmailMessage) -> None:
 
 def send_certificate_email(org: OrgSettings, cert: Certificate, recipient: str, job_id: int) -> None:
     _, _, sender = _smtp_config(org)
-    if not cert.pdf_path or not os.path.exists(cert.pdf_path):
+    if not cert.pdf_data:
         raise RuntimeError("Certificate PDF has not been rendered")
 
     text_body = (
@@ -105,11 +104,11 @@ def send_certificate_email(org: OrgSettings, cert: Certificate, recipient: str, 
     )
     msg.add_alternative(html_body, subtype="html")
 
-    with open(cert.pdf_path, "rb") as f:
-        msg.add_attachment(
-            f.read(), maintype="application", subtype="pdf",
-            filename=os.path.basename(cert.pdf_path),
-        )
+    safe_no = (cert.certificate_no or f"cert-{cert.id}").replace("/", "_")
+    msg.add_attachment(
+        cert.pdf_data, maintype="application", subtype="pdf",
+        filename=f"{safe_no}.pdf",
+    )
 
     _send_message(org, msg)
 

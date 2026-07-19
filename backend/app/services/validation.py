@@ -105,8 +105,8 @@ def check_certificate(db: Session, cert: Certificate, org: OrgSettings) -> list[
     # org fields for a company that hasn't set its own yet) ---
     company = cert.company
     has_seal = bool(
-        company and company.seal_path
-        or org.seal_signature_path or (org.signature_path and org.seal_path)
+        company and company.seal_data
+        or org.seal_signature_data or (org.signature_data and org.seal_data)
     )
     if not has_seal:
         anomalies.append(Anomaly("MISSING_SEAL", "Seal/signature image not uploaded in Settings"))

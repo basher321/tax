@@ -114,13 +114,12 @@ def generate_certificate(db: Session, company_id: int, tin: str, period: str) ->
         ))
     db.flush()
 
-    cert.pdf_path = render_certificate_pdf(db, cert)
+    render_certificate_pdf(db, cert)  # sets cert.pdf_data / cert.image_data
     db.commit()
     return cert
 
 
-def regenerate_pdf(db: Session, cert: Certificate) -> str:
+def regenerate_pdf(db: Session, cert: Certificate) -> None:
     """Re-render after a Remarks edit — data lines are immutable."""
-    cert.pdf_path = render_certificate_pdf(db, cert)
+    render_certificate_pdf(db, cert)  # sets cert.pdf_data / cert.image_data
     db.commit()
-    return cert.pdf_path

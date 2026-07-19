@@ -8,11 +8,10 @@ from datetime import date, datetime
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import and_, func, or_, true
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
 from ..database import get_db
 from ..models.entities import (
     Certificate,
@@ -121,6 +120,17 @@ def _save_upload(upload: UploadFile) -> str:
     with os.fdopen(fd, "wb") as f:
         shutil.copyfileobj(upload.file, f)
     return path
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    """Uploaded images are stored as raw bytes in the database (no local
+    disk, no filename/extension to rely on) — sniff the real format from
+    its magic bytes so the Content-Type served back is always correct."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    return "application/octet-stream"
 
 
 # ---------------------------------------------------------------- Import ----
@@ -429,10 +439,11 @@ def bulk_dispatch(body: BulkDispatchRequest, db: Session = Depends(get_db)):
 def download_pdf(cert_id: int, db: Session = Depends(get_db)):
     """Serves the PDF for Download and Print actions."""
     cert = db.get(Certificate, cert_id)
-    if not cert or not cert.pdf_path or not os.path.exists(cert.pdf_path):
+    if not cert or not cert.pdf_data:
         raise HTTPException(404, "PDF not found")
-    return FileResponse(cert.pdf_path, media_type="application/pdf",
-                        filename=os.path.basename(cert.pdf_path))
+    safe_no = (cert.certificate_no or f"cert-{cert.id}").replace("/", "_")
+    return Response(content=cert.pdf_data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{safe_no}.pdf"'})
 
 
 @router.get("/certificates/{cert_id}/image")
@@ -441,18 +452,17 @@ def download_certificate_image(cert_id: int, db: Session = Depends(get_db)):
     rasterized from the same PDF — pixel-identical to it, not a separate
     render. Self-heals certificates with no image yet by fully re-rendering
     them with the current template — not just rasterizing whatever PDF
-    happens to be on disk, which could predate a layout change and would
-    otherwise silently reproduce a stale design."""
+    happens to already be stored, which could predate a layout change and
+    would otherwise silently reproduce a stale design."""
     cert = db.get(Certificate, cert_id)
     if not cert:
         raise HTTPException(404, "Certificate not found")
-    if not cert.image_path or not os.path.exists(cert.image_path):
-        cert.pdf_path = render_certificate_pdf(db, cert)
+    if not cert.image_data:
+        render_certificate_pdf(db, cert)
         db.commit()
-    if not cert.image_path or not os.path.exists(cert.image_path):
+    if not cert.image_data:
         raise HTTPException(404, "Certificate image not found")
-    return FileResponse(cert.image_path, media_type="image/jpeg",
-                        filename=os.path.basename(cert.image_path))
+    return Response(content=cert.image_data, media_type="image/jpeg")
 
 
 @router.post("/certificates/{cert_id}/dispatch")
@@ -489,7 +499,7 @@ def whatsapp_links(cert_id: int, db: Session = Depends(get_db)):
     cert = db.get(Certificate, cert_id)
     if not cert:
         raise HTTPException(404, "Certificate not found")
-    if not cert.pdf_path or not os.path.exists(cert.pdf_path):
+    if not cert.pdf_data:
         raise HTTPException(422, "Certificate PDF has not been rendered yet")
 
     org = get_org_settings(db)
@@ -603,11 +613,19 @@ def add_contact(supplier_id: int, body: ContactCreate, db: Session = Depends(get
 
 
 # --------------------------------------------------------------- Settings ----
+_ORG_BINARY_FIELDS = {"logo_data", "seal_signature_data", "signature_data", "seal_data"}
+
+
 @router.get("/settings/org")
 def get_org(db: Session = Depends(get_db)):
     s = get_org_settings(db)
     db.commit()
-    data = {c.name: getattr(s, c.name) for c in s.__table__.columns}
+    # Raw image bytes are never inlined into JSON — fetched separately via
+    # the dedicated image routes. Booleans stand in for "is one uploaded".
+    data = {c.name: getattr(s, c.name) for c in s.__table__.columns
+            if c.name not in _ORG_BINARY_FIELDS}
+    for field in _ORG_BINARY_FIELDS:
+        data[f"has_{field[:-5]}"] = bool(getattr(s, field))
     data["smtp_password"] = bool(data.get("smtp_password"))  # never echo secrets
     data["wa_token"] = bool(data.get("wa_token"))
     data["wa_twilio_auth"] = bool(data.get("wa_twilio_auth"))
@@ -634,78 +652,69 @@ def test_email(db: Session = Depends(get_db)):
 
 
 @router.post("/settings/org/logo")
-def upload_logo(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    return _store_image(db, file, "logo_path", "logo")
+async def upload_logo(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    return await _store_image(db, file, "logo_data")
 
 
 @router.post("/settings/org/seal")
-def upload_seal(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_seal(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Seal + signature image — PNG with transparency recommended."""
-    if file.content_type not in ("image/png", "image/jpeg"):
-        raise HTTPException(422, "Upload a PNG (preferred, supports transparency) or JPEG")
-    return _store_image(db, file, "seal_signature_path", "seal_signature")
+    _require_image(file)
+    return await _store_image(db, file, "seal_signature_data")
 
 
 @router.get("/settings/org/logo")
 def get_logo(db: Session = Depends(get_db)):
     org = get_org_settings(db)
-    if not org.logo_path or not os.path.exists(org.logo_path):
+    if not org.logo_data:
         raise HTTPException(404, "No logo uploaded")
-    return FileResponse(org.logo_path)
+    return Response(content=org.logo_data, media_type=_sniff_image_mime(org.logo_data))
 
 
 @router.get("/settings/org/seal")
 def get_seal(db: Session = Depends(get_db)):
     org = get_org_settings(db)
-    if not org.seal_signature_path or not os.path.exists(org.seal_signature_path):
+    if not org.seal_signature_data:
         raise HTTPException(404, "No seal/signature uploaded")
-    return FileResponse(org.seal_signature_path)
+    return Response(content=org.seal_signature_data, media_type=_sniff_image_mime(org.seal_signature_data))
 
 
 @router.post("/settings/org/signature")
-def upload_signature(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_signature(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Signature image, separate from the seal image (item 8)."""
-    if file.content_type not in ("image/png", "image/jpeg"):
-        raise HTTPException(422, "Upload a PNG (preferred, supports transparency) or JPEG")
-    return _store_image(db, file, "signature_path", "signature")
+    _require_image(file)
+    return await _store_image(db, file, "signature_data")
 
 
 @router.get("/settings/org/signature")
 def get_signature(db: Session = Depends(get_db)):
     org = get_org_settings(db)
-    if not org.signature_path or not os.path.exists(org.signature_path):
+    if not org.signature_data:
         raise HTTPException(404, "No signature uploaded")
-    return FileResponse(org.signature_path)
+    return Response(content=org.signature_data, media_type=_sniff_image_mime(org.signature_data))
 
 
 @router.post("/settings/org/seal-image")
-def upload_seal_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_seal_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Seal image, separate from the signature image (item 8)."""
-    if file.content_type not in ("image/png", "image/jpeg"):
-        raise HTTPException(422, "Upload a PNG (preferred, supports transparency) or JPEG")
-    return _store_image(db, file, "seal_path", "seal")
+    _require_image(file)
+    return await _store_image(db, file, "seal_data")
 
 
 @router.get("/settings/org/seal-image")
 def get_seal_image(db: Session = Depends(get_db)):
     org = get_org_settings(db)
-    if not org.seal_path or not os.path.exists(org.seal_path):
+    if not org.seal_data:
         raise HTTPException(404, "No seal uploaded")
-    return FileResponse(org.seal_path)
+    return Response(content=org.seal_data, media_type=_sniff_image_mime(org.seal_data))
 
 
-def _store_image(db: Session, file: UploadFile, attr: str, name: str):
-    settings = get_settings()
-    img_dir = os.path.join(settings.storage_dir, "images")
-    os.makedirs(img_dir, exist_ok=True)
-    ext = os.path.splitext(file.filename or "")[1] or ".png"
-    path = os.path.join(img_dir, f"{name}{ext}")
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+async def _store_image(db: Session, file: UploadFile, attr: str):
+    data = await file.read()
     s = get_org_settings(db)
-    setattr(s, attr, path)
+    setattr(s, attr, data)
     db.commit()
-    return {"ok": True, "path": path}
+    return {"ok": True}
 
 
 # -------------------------------------------------------------- Companies ----
@@ -738,47 +747,47 @@ def update_company(company_id: int, body: CompanyUpdate, db: Session = Depends(g
 
 
 @router.post("/companies/{company_id}/seal")
-def upload_company_seal(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_company_seal(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
     _require_image(file)
-    return _store_company_image(db, company_id, file, "seal_path", f"company{company_id}_seal")
+    return await _store_company_image(db, company_id, file, "seal_data")
 
 
 @router.get("/companies/{company_id}/seal")
 def get_company_seal(company_id: int, db: Session = Depends(get_db)):
     company = get_company(db, company_id)
-    if not company.seal_path or not os.path.exists(company.seal_path):
+    if not company.seal_data:
         raise HTTPException(404, "No seal uploaded")
-    return FileResponse(company.seal_path)
+    return Response(content=company.seal_data, media_type=_sniff_image_mime(company.seal_data))
 
 
 @router.post("/companies/{company_id}/letterhead/header")
-def upload_letterhead_header(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_letterhead_header(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
     _require_image(file)
-    return _store_company_image(db, company_id, file, "letterhead_header_path",
-                                f"company{company_id}_letterhead_header")
+    return await _store_company_image(db, company_id, file, "letterhead_header_data")
 
 
 @router.get("/companies/{company_id}/letterhead/header")
 def get_letterhead_header(company_id: int, db: Session = Depends(get_db)):
     company = get_company(db, company_id)
-    if not company.letterhead_header_path or not os.path.exists(company.letterhead_header_path):
+    if not company.letterhead_header_data:
         raise HTTPException(404, "No letterhead header uploaded")
-    return FileResponse(company.letterhead_header_path)
+    return Response(content=company.letterhead_header_data,
+                    media_type=_sniff_image_mime(company.letterhead_header_data))
 
 
 @router.post("/companies/{company_id}/letterhead/footer")
-def upload_letterhead_footer(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_letterhead_footer(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
     _require_image(file)
-    return _store_company_image(db, company_id, file, "letterhead_footer_path",
-                                f"company{company_id}_letterhead_footer")
+    return await _store_company_image(db, company_id, file, "letterhead_footer_data")
 
 
 @router.get("/companies/{company_id}/letterhead/footer")
 def get_letterhead_footer(company_id: int, db: Session = Depends(get_db)):
     company = get_company(db, company_id)
-    if not company.letterhead_footer_path or not os.path.exists(company.letterhead_footer_path):
+    if not company.letterhead_footer_data:
         raise HTTPException(404, "No letterhead footer uploaded")
-    return FileResponse(company.letterhead_footer_path)
+    return Response(content=company.letterhead_footer_data,
+                    media_type=_sniff_image_mime(company.letterhead_footer_data))
 
 
 def _require_image(file: UploadFile):
@@ -786,18 +795,12 @@ def _require_image(file: UploadFile):
         raise HTTPException(422, "Upload a PNG (preferred, supports transparency) or JPEG")
 
 
-def _store_company_image(db: Session, company_id: int, file: UploadFile, attr: str, name: str):
+async def _store_company_image(db: Session, company_id: int, file: UploadFile, attr: str):
     company = get_company(db, company_id)
-    settings = get_settings()
-    img_dir = os.path.join(settings.storage_dir, "images")
-    os.makedirs(img_dir, exist_ok=True)
-    ext = os.path.splitext(file.filename or "")[1] or ".png"
-    path = os.path.join(img_dir, f"{name}{ext}")
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    setattr(company, attr, path)
+    data = await file.read()
+    setattr(company, attr, data)
     db.commit()
-    return {"ok": True, "path": path}
+    return {"ok": True}
 
 
 # ------------------------------------------------------------- Signatures ----
@@ -808,25 +811,18 @@ def list_signatures(company_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/companies/{company_id}/signatures", response_model=SignatureOut)
-def create_signature(company_id: int, name: str = Form(...),
-                     designation: str | None = Form(None),
-                     email: str | None = Form(None),
-                     file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def create_signature(company_id: int, name: str = Form(...),
+                           designation: str | None = Form(None),
+                           email: str | None = Form(None),
+                           file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Multiple named signatures per company; every one flagged `enabled`
     renders on every certificate generated for that company."""
     get_company(db, company_id)  # 404s if the company doesn't exist
     _require_image(file)
-    settings = get_settings()
-    img_dir = os.path.join(settings.storage_dir, "images")
-    os.makedirs(img_dir, exist_ok=True)
-    ext = os.path.splitext(file.filename or "")[1] or ".png"
-    safe_name = "".join(ch if ch.isalnum() else "_" for ch in name)
-    path = os.path.join(img_dir, f"company{company_id}_signature_{safe_name}{ext}")
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    data = await file.read()
 
     sig = Signature(company_id=company_id, name=name, designation=designation,
-                    email=email, image_path=path, enabled=True)
+                    email=email, image_data=data, enabled=True)
     db.add(sig)
     db.commit()
     db.refresh(sig)
@@ -836,9 +832,9 @@ def create_signature(company_id: int, name: str = Form(...),
 @router.get("/companies/{company_id}/signatures/{signature_id}/image")
 def get_signature_image(company_id: int, signature_id: int, db: Session = Depends(get_db)):
     sig = db.get(Signature, signature_id)
-    if not sig or sig.company_id != company_id or not os.path.exists(sig.image_path):
+    if not sig or sig.company_id != company_id or not sig.image_data:
         raise HTTPException(404, "Signature image not found")
-    return FileResponse(sig.image_path)
+    return Response(content=sig.image_data, media_type=_sniff_image_mime(sig.image_data))
 
 
 @router.patch("/companies/{company_id}/signatures/{signature_id}", response_model=SignatureOut)
@@ -971,9 +967,9 @@ def public_certificate(cert_id: int, sig: str, db: Session = Depends(get_db)):
     if not verify_certificate_sig(cert_id, sig):
         raise HTTPException(403, "Invalid link signature")
     cert = db.get(Certificate, cert_id)
-    if not cert or not cert.pdf_path or not os.path.exists(cert.pdf_path):
+    if not cert or not cert.pdf_data:
         raise HTTPException(404, "Not found")
-    return FileResponse(cert.pdf_path, media_type="application/pdf")
+    return Response(content=cert.pdf_data, media_type="application/pdf")
 
 
 # 1x1 transparent PNG, served only if no org logo/signature has been uploaded.
@@ -995,7 +991,7 @@ def track_email_open(job_id: int, sig: str, db: Session = Depends(get_db)):
         job.opened_at = datetime.utcnow()
         db.commit()
     org = get_org_settings(db)
-    for path in (org.logo_path, org.seal_signature_path):
-        if path and os.path.exists(path):
-            return FileResponse(path)
+    for data in (org.logo_data, org.seal_signature_data):
+        if data:
+            return Response(content=data, media_type=_sniff_image_mime(data))
     return Response(content=_BLANK_PIXEL, media_type="image/png")

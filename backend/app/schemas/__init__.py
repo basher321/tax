@@ -204,9 +204,9 @@ class CompanyOut(ORM):
     id: int
     name: str
     address: str | None
-    seal_path: str | None
-    letterhead_header_path: str | None
-    letterhead_footer_path: str | None
+    has_seal: bool
+    has_letterhead_header: bool
+    has_letterhead_footer: bool
     officer_name: str | None
     officer_designation: str | None
     officer_email: str | None
@@ -251,7 +251,6 @@ class SignatureOut(ORM):
     name: str
     designation: str | None
     email: str | None
-    image_path: str
     enabled: bool
 
 

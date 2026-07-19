@@ -24,6 +24,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -49,9 +50,13 @@ class Company(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True)
     address: Mapped[str | None] = mapped_column(Text)
-    seal_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha
-    letterhead_header_path: Mapped[str | None] = mapped_column(String(512))
-    letterhead_footer_path: Mapped[str | None] = mapped_column(String(512))
+    # Uploaded images live in the database as raw bytes (not local disk) so
+    # they survive on stateless/serverless hosting, where each request can
+    # get a fresh, empty filesystem. Served back via a dedicated route that
+    # sniffs the real image format from its bytes (no filename to rely on).
+    seal_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # PNG w/ alpha
+    letterhead_header_data: Mapped[bytes | None] = mapped_column(LargeBinary)
+    letterhead_footer_data: Mapped[bytes | None] = mapped_column(LargeBinary)
     officer_name: Mapped[str | None] = mapped_column(String(255))
     officer_designation: Mapped[str | None] = mapped_column(String(255))
     officer_email: Mapped[str | None] = mapped_column(String(255))
@@ -67,6 +72,22 @@ class Company(Base):
         back_populates="company", cascade="all, delete-orphan"
     )
 
+    # Existence flags for CompanyOut — whether the image bytes are present,
+    # not the bytes themselves (those are fetched separately via the image
+    # routes, which is also what lets the frontend do `{company.has_seal &&
+    # <img src=... />}` without shipping the image inline in every response).
+    @property
+    def has_seal(self) -> bool:
+        return bool(self.seal_data)
+
+    @property
+    def has_letterhead_header(self) -> bool:
+        return bool(self.letterhead_header_data)
+
+    @property
+    def has_letterhead_footer(self) -> bool:
+        return bool(self.letterhead_footer_data)
+
 
 class Signature(Base):
     """A named signatory's signature, scoped to a company. Every signature
@@ -81,7 +102,10 @@ class Signature(Base):
     name: Mapped[str] = mapped_column(String(255))  # signatory's name
     designation: Mapped[str | None] = mapped_column(String(255))
     email: Mapped[str | None] = mapped_column(String(255))
-    image_path: Mapped[str] = mapped_column(String(512))
+    # Nullable at the DB level even though every signature created through
+    # the app always supplies an image — lets existing rows survive a
+    # migration from disk-based storage without one until re-uploaded.
+    image_data: Mapped[bytes | None] = mapped_column(LargeBinary)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
@@ -242,11 +266,11 @@ class Certificate(Base):
     # "auto" re-applies today's date whenever the certificate is (re)saved;
     # "manual" keeps whatever issue_date was explicitly set in the preview.
     issue_date_mode: Mapped[str] = mapped_column(String(10), default="auto")
-    pdf_path: Mapped[str | None] = mapped_column(String(512))
-    # High-resolution JPEG rasterized directly from pdf_path (same source,
+    pdf_data: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # High-resolution JPEG rasterized directly from pdf_data (same source,
     # so it's pixel-identical to the PDF) — the share-ready artifact for
     # WhatsApp/email, sized to avoid WhatsApp's own re-compression.
-    image_path: Mapped[str | None] = mapped_column(String(512))
+    image_data: Mapped[bytes | None] = mapped_column(LargeBinary)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     company: Mapped[Company] = relationship()
@@ -305,10 +329,10 @@ class OrgSettings(Base):
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     company_name: Mapped[str | None] = mapped_column(String(255))
     company_address: Mapped[str | None] = mapped_column(Text)
-    logo_path: Mapped[str | None] = mapped_column(String(512))
-    seal_signature_path: Mapped[str | None] = mapped_column(String(512))  # legacy combined PNG w/ alpha
-    signature_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha, preferred over the legacy combined field
-    seal_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha, preferred over the legacy combined field
+    logo_data: Mapped[bytes | None] = mapped_column(LargeBinary)
+    seal_signature_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # legacy combined PNG w/ alpha
+    signature_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # PNG w/ alpha, preferred over the legacy combined field
+    seal_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # PNG w/ alpha, preferred over the legacy combined field
     officer_name: Mapped[str | None] = mapped_column(String(255))
     officer_designation: Mapped[str | None] = mapped_column(String(255))
     officer_email: Mapped[str | None] = mapped_column(String(255))

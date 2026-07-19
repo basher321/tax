@@ -268,6 +268,10 @@ export default function Settings() {
   const [num, setNum] = useState(null);
   const [companyForm, setCompanyForm] = useState(null);
   const [toast, notify, dismissToast] = useToast();
+  // Uploaded images are served from the database with no filename/path to
+  // cache-bust against — bump this on every upload so the browser fetches
+  // the fresh bytes instead of showing a stale cached image at the same URL.
+  const [imgVersion, setImgVersion] = useState(0);
   const [resetConfirm, setResetConfirm] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
 
@@ -312,8 +316,9 @@ export default function Settings() {
     // booleans standing in for stored secrets must not be sent back
     for (const k of ["smtp_password", "wa_token", "wa_twilio_auth"])
       if (typeof body[k] === "boolean") delete body[k];
-    delete body.id; delete body.logo_path; delete body.seal_signature_path;
-    delete body.signature_path; delete body.seal_path;
+    delete body.id;
+    delete body.has_logo; delete body.has_seal_signature;
+    delete body.has_signature; delete body.has_seal;
     try {
       await api.updateOrg(body);
       notify("Settings saved.");
@@ -333,7 +338,7 @@ export default function Settings() {
   }
 
   async function saveCompany(message = "Company details saved.") {
-    const { id, seal_path, letterhead_header_path, letterhead_footer_path, ...body } = companyForm;
+    const { id, has_seal, has_letterhead_header, has_letterhead_footer, ...body } = companyForm;
     try {
       await api.updateCompany(companyId, body);
       await refreshCompanies();
@@ -374,12 +379,13 @@ export default function Settings() {
     }
   }
 
-  const uploadCompanyImage = (fn, label, pathField) => async (e) => {
+  const uploadCompanyImage = (fn, label, hasField) => async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
     try {
-      const res = await fn(companyId, f);
-      setCompanyForm((current) => ({ ...current, [pathField]: res.path }));
+      await fn(companyId, f);
+      setCompanyForm((current) => ({ ...current, [hasField]: true }));
+      setImgVersion((v) => v + 1);
       await refreshCompanies();
       notify(`${label} uploaded.`);
     } catch (err) {
@@ -430,12 +436,12 @@ export default function Settings() {
         </p>
         <Field label="Seal image (PNG with transparency)">
           <div className="flex items-center gap-3">
-            {companyForm.seal_path && (
-              <img src={`${api.companySealUrl(companyId)}?t=${companyForm.seal_path}`} alt="Seal preview" className="h-10 border border-rule rounded bg-white object-contain" />
+            {companyForm.has_seal && (
+              <img src={`${api.companySealUrl(companyId)}?v=${imgVersion}`} alt="Seal preview" className="h-10 border border-rule rounded bg-white object-contain" />
             )}
             <label className="btn-ghost cursor-pointer inline-block">
-              {companyForm.seal_path ? "Replace seal" : "Upload seal"}
-              <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={uploadCompanyImage(api.uploadCompanySeal, "Seal", "seal_path")} />
+              {companyForm.has_seal ? "Replace seal" : "Upload seal"}
+              <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={uploadCompanyImage(api.uploadCompanySeal, "Seal", "has_seal")} />
             </label>
           </div>
         </Field>
@@ -464,23 +470,23 @@ export default function Settings() {
         <div className="grid grid-cols-2 gap-3">
           <Field label="Letterhead header">
             <div className="space-y-2">
-              {companyForm.letterhead_header_path && (
-                <img src={`${api.letterheadHeaderUrl(companyId)}?t=${companyForm.letterhead_header_path}`} alt="Letterhead header preview" className="w-full max-h-24 border border-rule rounded bg-white object-contain" />
+              {companyForm.has_letterhead_header && (
+                <img src={`${api.letterheadHeaderUrl(companyId)}?v=${imgVersion}`} alt="Letterhead header preview" className="w-full max-h-24 border border-rule rounded bg-white object-contain" />
               )}
               <label className="btn-ghost cursor-pointer inline-block">
-                {companyForm.letterhead_header_path ? "Replace header" : "Upload header"}
-                <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={uploadCompanyImage(api.uploadLetterheadHeader, "Letterhead header", "letterhead_header_path")} />
+                {companyForm.has_letterhead_header ? "Replace header" : "Upload header"}
+                <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={uploadCompanyImage(api.uploadLetterheadHeader, "Letterhead header", "has_letterhead_header")} />
               </label>
             </div>
           </Field>
           <Field label="Letterhead footer">
             <div className="space-y-2">
-              {companyForm.letterhead_footer_path && (
-                <img src={`${api.letterheadFooterUrl(companyId)}?t=${companyForm.letterhead_footer_path}`} alt="Letterhead footer preview" className="w-full max-h-24 border border-rule rounded bg-white object-contain" />
+              {companyForm.has_letterhead_footer && (
+                <img src={`${api.letterheadFooterUrl(companyId)}?v=${imgVersion}`} alt="Letterhead footer preview" className="w-full max-h-24 border border-rule rounded bg-white object-contain" />
               )}
               <label className="btn-ghost cursor-pointer inline-block">
-                {companyForm.letterhead_footer_path ? "Replace footer" : "Upload footer"}
-                <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={uploadCompanyImage(api.uploadLetterheadFooter, "Letterhead footer", "letterhead_footer_path")} />
+                {companyForm.has_letterhead_footer ? "Replace footer" : "Upload footer"}
+                <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={uploadCompanyImage(api.uploadLetterheadFooter, "Letterhead footer", "has_letterhead_footer")} />
               </label>
             </div>
           </Field>
