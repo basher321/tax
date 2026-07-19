@@ -1,6 +1,6 @@
 [project]
 name = "tax-certificate-backend"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.10"
 # Mirrors requirements.txt (still used by the Render/Railway deploy paths) —
 # Vercel's Python builder resolves/locks dependencies from this [project]
