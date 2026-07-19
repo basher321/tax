@@ -1,3 +1,27 @@
+[project]
+name = "tax-certificate-backend"
+version = "0.1.0"
+requires-python = ">=3.10"
+# Mirrors requirements.txt (still used by the Render/Railway deploy paths) —
+# Vercel's Python builder resolves/locks dependencies from this [project]
+# table via uv, not from requirements.txt directly.
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "reportlab>=4.1",
+    "pymupdf>=1.24",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+    'psycopg2-binary>=2.9 ; python_version >= "3.10"',
+    "pytest>=8.0",
+]
+
 [tool.vercel]
 # Vercel's Python runtime auto-detects a FastAPI entrypoint in a handful of
 # default locations (api/index.py, main.py, etc.); ours lives at app/main.py
