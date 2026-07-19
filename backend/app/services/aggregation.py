@@ -134,10 +134,19 @@ def build_certificate_data(
     return data
 
 
-def list_groupings(db: Session, company_id: int | None = None) -> list[dict]:
+def list_groupings(
+    db: Session,
+    company_id: int | None = None,
+    tin: str | None = None,
+    bin: str | None = None,
+    supplier_name: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[dict]:
     """All distinct (TIN, period) groupings present in imported data, scoped
     to one company — or across all companies when company_id is None (used
-    only by the Dashboard's global overview)."""
+    only by the Dashboard's global overview). Filters mirror GET
+    /certificates so the Pending and Generated tables search identically."""
     from sqlalchemy import func
 
     from ..models.entities import Supplier
@@ -159,6 +168,16 @@ def list_groupings(db: Session, company_id: int | None = None) -> list[dict]:
     )
     if company_id is not None:
         q = q.filter(Transaction.company_id == company_id)
+    if tin:
+        q = q.filter(Transaction.tin.like(f"%{tin}%"))
+    if bin:
+        q = q.filter(Supplier.bin.like(f"%{bin}%"))
+    if supplier_name:
+        q = q.filter(Transaction.supplier_name.ilike(f"%{supplier_name}%"))
+    if date_from:
+        q = q.filter(Transaction.cheque_date >= date_from)
+    if date_to:
+        q = q.filter(Transaction.cheque_date <= date_to)
     rows = q.group_by(Transaction.tin, Transaction.fiscal_year).all()
     return [
         {

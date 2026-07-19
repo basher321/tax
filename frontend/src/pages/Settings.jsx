@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client.js";
 import { useCompany } from "../context/CompanyContext.jsx";
+import { Toast, useToast } from "../components/ui.jsx";
 
 // Preset SMTP hosts for the organization's preferred email providers.
 const SMTP_PRESETS = {
@@ -39,7 +40,7 @@ function CompaniesSection({ companies, companyId, setCompanyId, refreshCompanies
       setShowAdd(false);
       notify(`Company "${company.name}" created.`);
     } catch (err) {
-      notify(`Could not create company: ${err.message}`);
+      notify(`Could not create company: ${err.message}`, "err");
     } finally {
       setBusy(false);
     }
@@ -85,12 +86,18 @@ function CompaniesSection({ companies, companyId, setCompanyId, refreshCompanies
 }
 
 /* ------------------------------------------------------------------ */
-/* Named signatures (item 8): multiple per company, one marked default */
+/* Named signatures: multiple per company. Every one flagged enabled     */
+/* renders on every certificate for that company, evenly laid out above */
+/* the footer — there's no more "pick one at generation time."          */
 /* ------------------------------------------------------------------ */
 function SignaturesSection({ companyId, notify }) {
   const [signatures, setSignatures] = useState([]);
   const [newName, setNewName] = useState("");
+  const [newDesignation, setNewDesignation] = useState("");
+  const [newEmail, setNewEmail] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({ name: "", designation: "", email: "" });
 
   const load = () => api.listSignatures(companyId).then(setSignatures);
   useEffect(() => { if (companyId) load(); }, [companyId]);
@@ -98,59 +105,156 @@ function SignaturesSection({ companyId, notify }) {
   async function addSignature(e) {
     const file = e.target.files?.[0];
     if (!file || !newName.trim()) {
-      notify("Enter a name for the signature before choosing a file.");
+      notify("Enter a signatory name before choosing an image.", "err");
       e.target.value = "";
       return;
     }
     setBusy(true);
     try {
-      await api.createSignature(companyId, newName.trim(), file);
+      await api.createSignature(companyId, newName.trim(), newDesignation.trim() || null,
+        newEmail.trim() || null, file);
       setNewName("");
+      setNewDesignation("");
+      setNewEmail("");
       await load();
-      notify("Signature uploaded.");
+      notify("Signature added.");
     } catch (err) {
-      notify(`Could not upload signature: ${err.message}`);
+      notify(`Could not add signature: ${err.message}`, "err");
     } finally {
       setBusy(false);
       e.target.value = "";
     }
   }
 
-  async function makeDefault(sig) {
-    await api.updateSignature(companyId, sig.id, { is_default: true });
-    await load();
+  async function toggleEnabled(sig) {
+    try {
+      await api.updateSignature(companyId, sig.id, { enabled: !sig.enabled });
+      await load();
+      notify(`"${sig.name}" ${sig.enabled ? "disabled" : "enabled"}.`);
+    } catch (err) {
+      notify(`Could not update signature: ${err.message}`, "err");
+    }
+  }
+
+  function startEdit(sig) {
+    setEditingId(sig.id);
+    setEditForm({ name: sig.name, designation: sig.designation || "", email: sig.email || "" });
+  }
+
+  async function saveEdit(sig) {
+    if (!editForm.name.trim()) {
+      notify("Signatory name cannot be empty.", "err");
+      return;
+    }
+    try {
+      await api.updateSignature(companyId, sig.id, {
+        name: editForm.name.trim(),
+        designation: editForm.designation.trim() || null,
+        email: editForm.email.trim() || null,
+      });
+      setEditingId(null);
+      await load();
+      notify("Signature updated.");
+    } catch (err) {
+      notify(`Could not update signature: ${err.message}`, "err");
+    }
+  }
+
+  async function remove(sig) {
+    if (!window.confirm(`Delete the signature "${sig.name}"? This cannot be undone.`)) return;
+    try {
+      await api.deleteSignature(companyId, sig.id);
+      await load();
+      notify(`Signature "${sig.name}" deleted.`);
+    } catch (err) {
+      notify(`Could not delete signature: ${err.message}`, "err");
+    }
   }
 
   return (
     <section className="card p-5 space-y-3">
       <h2 className="font-medium">Signatures</h2>
       <p className="text-sm text-ink/60">
-        Upload and name more than one signature (e.g. per signatory/designation). The signature
-        picked when generating a certificate renders in the Signature and seal block.
+        Every signature marked Enabled renders together, evenly spaced, on every certificate
+        generated for this company.
       </p>
       {signatures.length > 0 && (
-        <ul className="space-y-2">
+        <ul className="divide-y divide-rule/70">
           {signatures.map((s) => (
-            <li key={s.id} className="flex items-center gap-3">
-              <img src={api.signatureImageUrl(companyId, s.id)} alt={s.name}
-                className="h-8 border border-rule rounded bg-white object-contain px-1" />
-              <span className="text-sm">{s.name}</span>
-              {s.is_default ? (
-                <span className="text-xs text-ledger">Default</span>
+            <li key={s.id} className="flex flex-wrap items-center gap-3 py-2.5">
+              <img
+                src={api.signatureImageUrl(companyId, s.id)}
+                alt={`${s.name} signature`}
+                className="h-10 w-16 shrink-0 border border-rule rounded bg-white object-contain px-1"
+              />
+              {editingId === s.id ? (
+                <div className="flex flex-1 min-w-[22rem] flex-wrap gap-2">
+                  <input
+                    className="input flex-1 min-w-[8rem]"
+                    aria-label="Signatory name"
+                    value={editForm.name}
+                    onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  />
+                  <input
+                    className="input flex-1 min-w-[8rem]"
+                    aria-label="Designation"
+                    placeholder="Designation"
+                    value={editForm.designation}
+                    onChange={(e) => setEditForm({ ...editForm, designation: e.target.value })}
+                  />
+                  <input
+                    className="input flex-1 min-w-[8rem]"
+                    aria-label="Email"
+                    type="email"
+                    placeholder="Email"
+                    value={editForm.email}
+                    onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                  />
+                </div>
               ) : (
-                <button className="btn-ghost !py-0.5 text-xs" onClick={() => makeDefault(s)}>Set default</button>
+                <div className="flex-1 min-w-[10rem]">
+                  <p className="text-sm font-medium">{s.name}</p>
+                  {s.designation && <p className="text-xs text-ink/50">{s.designation}</p>}
+                  {s.email && <p className="text-xs text-ink/40">{s.email}</p>}
+                </div>
               )}
+              <label className="flex shrink-0 items-center gap-1.5 text-xs text-ink/60">
+                <input type="checkbox" checked={s.enabled} onChange={() => toggleEnabled(s)} />
+                Enabled
+              </label>
+              {editingId === s.id ? (
+                <>
+                  <button className="btn-ghost btn-sm" onClick={() => saveEdit(s)}>Save</button>
+                  <button className="btn-ghost btn-sm" onClick={() => setEditingId(null)}>Cancel</button>
+                </>
+              ) : (
+                <button className="btn-ghost btn-sm" onClick={() => startEdit(s)}>Edit</button>
+              )}
+              <button
+                className="btn-ghost btn-sm border-red-200 text-red-700 hover:border-red-700 hover:text-red-800"
+                onClick={() => remove(s)}
+              >
+                Delete
+              </button>
             </li>
           ))}
         </ul>
       )}
-      <div className="flex gap-2 items-end">
-        <Field label="Signature name">
-          <input className="input" placeholder="e.g. Head of Tax & VAT" value={newName}
+      <div className="flex flex-wrap items-end gap-2 pt-1">
+        <Field label="Signatory name">
+          <input className="input" placeholder="e.g. Md. Rahim Uddin" value={newName}
             onChange={(e) => setNewName(e.target.value)} />
         </Field>
+        <Field label="Designation (optional)">
+          <input className="input" placeholder="e.g. Head of Tax & VAT" value={newDesignation}
+            onChange={(e) => setNewDesignation(e.target.value)} />
+        </Field>
+        <Field label="Email (optional)">
+          <input className="input" type="email" placeholder="e.g. rahim@company.com" value={newEmail}
+            onChange={(e) => setNewEmail(e.target.value)} />
+        </Field>
         <label className={`btn-ghost cursor-pointer inline-block ${busy ? "opacity-60 pointer-events-none" : ""}`}>
-          {busy ? "Uploading..." : "Upload signature image"}
+          {busy ? "Uploading..." : "Add signature image"}
           <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={addSignature} disabled={busy} />
         </label>
       </div>
@@ -163,7 +267,7 @@ export default function Settings() {
   const [org, setOrg] = useState(null);
   const [num, setNum] = useState(null);
   const [companyForm, setCompanyForm] = useState(null);
-  const [notice, setNotice] = useState(null);
+  const [toast, notify, dismissToast] = useToast();
   const [resetConfirm, setResetConfirm] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
 
@@ -186,9 +290,10 @@ export default function Settings() {
         <h1 className="text-xl font-semibold">Settings</h1>
         <CompaniesSection
           companies={companies} companyId={companyId} setCompanyId={setCompanyId}
-          refreshCompanies={refreshCompanies} notify={setNotice}
+          refreshCompanies={refreshCompanies} notify={notify}
         />
         <p className="text-sm text-ink/60">Create a company above to configure its identity, seal, signatures, letterhead, and numbering.</p>
+        <Toast toast={toast} onDismiss={dismissToast} />
       </div>
     );
   }
@@ -209,34 +314,46 @@ export default function Settings() {
       if (typeof body[k] === "boolean") delete body[k];
     delete body.id; delete body.logo_path; delete body.seal_signature_path;
     delete body.signature_path; delete body.seal_path;
-    await api.updateOrg(body);
-    setNotice("Settings saved.");
+    try {
+      await api.updateOrg(body);
+      notify("Settings saved.");
+    } catch (err) {
+      notify(`Could not save settings: ${err.message}`, "err");
+    }
   }
 
   async function testEmail() {
     try {
       await saveOrg();
       const res = await api.testEmail();
-      setNotice(`Test email sent to ${res.recipient}.`);
+      notify(`Test email sent to ${res.recipient}.`);
     } catch (err) {
-      setNotice(`Email test failed: ${err.message}`);
+      notify(`Email test failed: ${err.message}`, "err");
     }
   }
 
-  async function saveCompany() {
-    const { id, logo_path, seal_path, letterhead_header_path, letterhead_footer_path, ...body } = companyForm;
-    await api.updateCompany(companyId, body);
-    await refreshCompanies();
-    setNotice("Company details saved.");
+  async function saveCompany(message = "Company details saved.") {
+    const { id, seal_path, letterhead_header_path, letterhead_footer_path, ...body } = companyForm;
+    try {
+      await api.updateCompany(companyId, body);
+      await refreshCompanies();
+      notify(message);
+    } catch (err) {
+      notify(`Could not save: ${err.message}`, "err");
+    }
   }
 
   async function saveNumbering() {
-    await api.updateNumbering(companyId, {
-      ...num,
-      pad_width: Number(num.pad_width),
-      start_number: Number(num.start_number),
-    });
-    setNotice("Numbering configuration saved.");
+    try {
+      await api.updateNumbering(companyId, {
+        ...num,
+        pad_width: Number(num.pad_width),
+        start_number: Number(num.start_number),
+      });
+      notify("Numbering configuration saved.");
+    } catch (err) {
+      notify(`Could not save numbering: ${err.message}`, "err");
+    }
   }
 
   async function resetDatabase() {
@@ -249,9 +366,9 @@ export default function Settings() {
       if (!freshCompanies.length) setCompanyId(null);
       setOrg(await api.getOrg());
       setResetConfirm("");
-      setNotice("Database reset complete. You can start again.");
+      notify("Database reset complete. You can start again.");
     } catch (err) {
-      setNotice(`Database reset failed: ${err.message}`);
+      notify(`Database reset failed: ${err.message}`, "err");
     } finally {
       setResetBusy(false);
     }
@@ -260,10 +377,14 @@ export default function Settings() {
   const uploadCompanyImage = (fn, label, pathField) => async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    const res = await fn(companyId, f);
-    setCompanyForm((current) => ({ ...current, [pathField]: res.path }));
-    await refreshCompanies();
-    setNotice(`${label} uploaded.`);
+    try {
+      const res = await fn(companyId, f);
+      setCompanyForm((current) => ({ ...current, [pathField]: res.path }));
+      await refreshCompanies();
+      notify(`${label} uploaded.`);
+    } catch (err) {
+      notify(`Could not upload ${label.toLowerCase()}: ${err.message}`, "err");
+    }
   };
 
   // Mirrors backend numbering.render_number_format's token substitution
@@ -286,39 +407,26 @@ export default function Settings() {
   return (
     <div className="space-y-6 max-w-3xl">
       <h1 className="text-xl font-semibold">Settings</h1>
-      {notice && <p className="text-sm text-ledger">{notice}</p>}
 
       <CompaniesSection
         companies={companies} companyId={companyId} setCompanyId={setCompanyId}
-        refreshCompanies={refreshCompanies} notify={setNotice}
+        refreshCompanies={refreshCompanies} notify={notify}
       />
 
       {/* Organizational information (per company) */}
       <section className="card p-5 space-y-3">
         <h2 className="font-medium">Organizational information</h2>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Company name"><input className="input" value={companyForm.name || ""} onChange={setC("name")} /></Field>
-          <Field label="Company logo">
-            <div className="flex items-center gap-3">
-              {companyForm.logo_path && (
-                <img src={`${api.companyLogoUrl(companyId)}?t=${companyForm.logo_path}`} alt="Logo preview" className="h-8 border border-rule rounded bg-white object-contain px-1" />
-              )}
-              <label className="btn-ghost cursor-pointer inline-block">
-                {companyForm.logo_path ? "Replace logo" : "Upload logo"}
-                <input type="file" accept="image/*" className="hidden" onChange={uploadCompanyImage(api.uploadCompanyLogo, "Logo", "logo_path")} />
-              </label>
-            </div>
-          </Field>
-        </div>
+        <Field label="Company name"><input className="input" value={companyForm.name || ""} onChange={setC("name")} /></Field>
         <Field label="Address"><textarea className="input" rows={2} value={companyForm.address || ""} onChange={setC("address")} /></Field>
-        <button className="btn-primary" onClick={saveCompany}>Save company details</button>
+        <button className="btn-primary" onClick={() => saveCompany()}>Save company details</button>
       </section>
 
       {/* Seal + designated officer (per company) */}
       <section className="card p-5 space-y-3">
         <h2 className="font-medium">Seal &amp; designated officer</h2>
         <p className="text-sm text-ink/60">
-          The seal renders below the issue date at the bottom of the Signature and seal block.
+          The seal renders below the issue date in the footer's Seal block, separate from the
+          signatures configured below.
         </p>
         <Field label="Seal image (PNG with transparency)">
           <div className="flex items-center gap-3">
@@ -340,10 +448,10 @@ export default function Settings() {
           <Field label="Default bank name (Section 07)"><input className="input" value={companyForm.default_bank_name || ""} onChange={setC("default_bank_name")} /></Field>
           <Field label="Default payment description (Section 06)"><input className="input" value={companyForm.default_description || ""} onChange={setC("default_description")} /></Field>
         </div>
-        <button className="btn-primary" onClick={saveCompany}>Save seal &amp; officer details</button>
+        <button className="btn-primary" onClick={() => saveCompany("Seal & officer details saved.")}>Save seal &amp; officer details</button>
       </section>
 
-      <SignaturesSection companyId={companyId} notify={setNotice} />
+      <SignaturesSection companyId={companyId} notify={notify} />
 
       {/* Company letterhead (item 12) */}
       <section className="card p-5 space-y-3">
@@ -357,7 +465,7 @@ export default function Settings() {
           <Field label="Letterhead header">
             <div className="space-y-2">
               {companyForm.letterhead_header_path && (
-                <img src={`${api.letterheadHeaderUrl(companyId)}?t=${companyForm.letterhead_header_path}`} alt="Letterhead header preview" className="w-full border border-rule rounded bg-white object-contain" />
+                <img src={`${api.letterheadHeaderUrl(companyId)}?t=${companyForm.letterhead_header_path}`} alt="Letterhead header preview" className="w-full max-h-24 border border-rule rounded bg-white object-contain" />
               )}
               <label className="btn-ghost cursor-pointer inline-block">
                 {companyForm.letterhead_header_path ? "Replace header" : "Upload header"}
@@ -368,7 +476,7 @@ export default function Settings() {
           <Field label="Letterhead footer">
             <div className="space-y-2">
               {companyForm.letterhead_footer_path && (
-                <img src={`${api.letterheadFooterUrl(companyId)}?t=${companyForm.letterhead_footer_path}`} alt="Letterhead footer preview" className="w-full border border-rule rounded bg-white object-contain" />
+                <img src={`${api.letterheadFooterUrl(companyId)}?t=${companyForm.letterhead_footer_path}`} alt="Letterhead footer preview" className="w-full max-h-24 border border-rule rounded bg-white object-contain" />
               )}
               <label className="btn-ghost cursor-pointer inline-block">
                 {companyForm.letterhead_footer_path ? "Replace footer" : "Upload footer"}
@@ -491,6 +599,8 @@ export default function Settings() {
           </button>
         </div>
       </section>
+
+      <Toast toast={toast} onDismiss={dismissToast} />
     </div>
   );
 }

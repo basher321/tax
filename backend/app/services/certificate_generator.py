@@ -15,7 +15,6 @@ from ..models.entities import (
     Company,
     OrgSettings,
     PartyType,
-    Signature,
     Supplier,
 )
 from .aggregation import build_certificate_data
@@ -44,32 +43,7 @@ def get_company(db: Session, company_id: int) -> Company:
     return company
 
 
-def get_default_company(db: Session) -> Company:
-    """First company flagged is_default, else the first company created."""
-    company = db.query(Company).filter(Company.is_default.is_(True)).first()
-    if not company:
-        company = db.query(Company).order_by(Company.id).first()
-    if not company:
-        raise GenerationError("No company exists yet — create one in Settings first.")
-    return company
-
-
-def _resolve_signature_id(db: Session, company_id: int, signature_id: int | None) -> int | None:
-    if signature_id is not None:
-        sig = db.get(Signature, signature_id)
-        if not sig or sig.company_id != company_id:
-            raise GenerationError("Signature does not belong to this company")
-        return signature_id
-    default_sig = (
-        db.query(Signature)
-        .filter(Signature.company_id == company_id, Signature.is_default.is_(True))
-        .first()
-    )
-    return default_sig.id if default_sig else None
-
-
-def generate_certificate(db: Session, company_id: int, tin: str, period: str,
-                         signature_id: int | None = None) -> Certificate:
+def generate_certificate(db: Session, company_id: int, tin: str, period: str) -> Certificate:
     existing = (
         db.query(Certificate)
         .filter(Certificate.company_id == company_id, Certificate.tin == tin,
@@ -102,12 +76,10 @@ def generate_certificate(db: Session, company_id: int, tin: str, period: str,
         )
 
     cert_no = allocate_certificate_number(db, company_id, period)
-    resolved_signature_id = _resolve_signature_id(db, company_id, signature_id)
 
     cert = Certificate(
         certificate_no=cert_no,
         company_id=company_id,
-        signature_id=resolved_signature_id,
         supplier_id=supplier.id,
         tin=tin,
         period=period,

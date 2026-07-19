@@ -19,10 +19,10 @@ async function request(path, options = {}) {
   return res.json();
 }
 
-const qs = (params) =>
-  new URLSearchParams(
-    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""))
-  ).toString();
+const dropBlank = (params) =>
+  Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""));
+
+const qs = (params) => new URLSearchParams(dropBlank(params)).toString();
 
 export const api = {
   dashboard: () => request("/dashboard"),
@@ -33,10 +33,6 @@ export const api = {
     request("/companies", { method: "POST", body: JSON.stringify(body) }),
   updateCompany: (id, body) =>
     request(`/companies/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  uploadCompanyLogo: (id, file) => {
-    const fd = new FormData(); fd.append("file", file);
-    return request(`/companies/${id}/logo`, { method: "POST", body: fd });
-  },
   uploadCompanySeal: (id, file) => {
     const fd = new FormData(); fd.append("file", file);
     return request(`/companies/${id}/seal`, { method: "POST", body: fd });
@@ -49,21 +45,27 @@ export const api = {
     const fd = new FormData(); fd.append("file", file);
     return request(`/companies/${id}/letterhead/footer`, { method: "POST", body: fd });
   },
-  companyLogoUrl: (id) => `${BASE}/companies/${id}/logo`,
   companySealUrl: (id) => `${BASE}/companies/${id}/seal`,
   letterheadHeaderUrl: (id) => `${BASE}/companies/${id}/letterhead/header`,
   letterheadFooterUrl: (id) => `${BASE}/companies/${id}/letterhead/footer`,
 
-  // ---- Named signatures (item 8) ----
+  // ---- Named signatures: every one flagged enabled renders on every
+  // certificate generated for the company (no per-certificate choice) ----
   listSignatures: (companyId) => request(`/companies/${companyId}/signatures`),
-  createSignature: (companyId, name, file) => {
-    const fd = new FormData(); fd.append("name", name); fd.append("file", file);
+  createSignature: (companyId, name, designation, email, file) => {
+    const fd = new FormData();
+    fd.append("name", name);
+    if (designation) fd.append("designation", designation);
+    if (email) fd.append("email", email);
+    fd.append("file", file);
     return request(`/companies/${companyId}/signatures`, { method: "POST", body: fd });
   },
   updateSignature: (companyId, sigId, body) =>
     request(`/companies/${companyId}/signatures/${sigId}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
+  deleteSignature: (companyId, sigId) =>
+    request(`/companies/${companyId}/signatures/${sigId}`, { method: "DELETE" }),
   signatureImageUrl: (companyId, sigId) =>
     `${BASE}/companies/${companyId}/signatures/${sigId}/image`,
 
@@ -79,24 +81,17 @@ export const api = {
     fd.append("file", file);
     return request("/import/depot", { method: "POST", body: fd });
   },
-  uploadChallan: (companyId, file) => {
-    const fd = new FormData();
-    fd.append("company_id", companyId);
-    fd.append("file", file);
-    return request("/import/challan", { method: "POST", body: fd });
-  },
-  adjustTransaction: (id, body) =>
-    request(`/transactions/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   importBatches: (companyId) => request(`/import/batches?company_id=${companyId}`),
 
   // ---- Certificates ----
-  pendingGroupings: (companyId) => request(`/certificates/pending?company_id=${companyId}`),
+  pendingGroupings: (companyId, filters = {}) =>
+    request(`/certificates/pending?${qs({ company_id: companyId, ...filters })}`),
   searchCertificates: (params) => request(`/certificates?${qs(params)}`),
   getCertificate: (id) => request(`/certificates/${id}`),
-  generate: (companyId, tin, period, signatureId) =>
+  generate: (companyId, tin, period) =>
     request("/certificates/generate", {
       method: "POST",
-      body: JSON.stringify({ company_id: companyId, tin, period, signature_id: signatureId }),
+      body: JSON.stringify({ company_id: companyId, tin, period }),
     }),
   generateBulk: (items) =>
     request("/certificates/generate/bulk", {
@@ -116,9 +111,9 @@ export const api = {
     }),
   anomalies: (id) => request(`/certificates/${id}/anomalies`),
   anomaliesBulk: (filters) =>
-    request("/certificates/anomalies/bulk", { method: "POST", body: JSON.stringify(filters) }),
+    request("/certificates/anomalies/bulk", { method: "POST", body: JSON.stringify(dropBlank(filters)) }),
   dispatchBulk: (filters) =>
-    request("/certificates/dispatch/bulk", { method: "POST", body: JSON.stringify(filters) }),
+    request("/certificates/dispatch/bulk", { method: "POST", body: JSON.stringify(dropBlank(filters)) }),
   exportUrl: (params) => `${BASE}/certificates/export?${qs(params)}`,
   dispatch: (id, payload) =>
     request(`/certificates/${id}/dispatch`, {
@@ -128,6 +123,7 @@ export const api = {
   dispatchJobsFor: (certId) => request(`/dispatch/jobs?certificate_id=${certId}`),
   dispatchJobs: () => request("/dispatch/jobs"),
   pdfUrl: (id) => `${BASE}/certificates/${id}/pdf`,
+  certificateImageUrl: (id) => `${BASE}/certificates/${id}/image`,
   whatsappLinks: (id) => request(`/certificates/${id}/whatsapp-links`),
 
   // ---- Legacy global org settings (SMTP/WhatsApp/dispatch mode stay global) ----

@@ -4,12 +4,13 @@ import { useCompany } from "../context/CompanyContext.jsx";
 
 const fmt = (n) => (n == null ? "" : Number(n).toLocaleString());
 
-const inDateRange = (from, to, dateFrom, dateTo) => {
-  if (!dateFrom && !dateTo) return true;
-  const start = from || to;
-  const end = to || from;
-  if (!start && !end) return false;
-  return (!dateTo || start <= dateTo) && (!dateFrom || end >= dateFrom);
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+// "DD Month YYYY", e.g. "14 March 2025" — bottom-section Seal/Signature date only.
+const fmtDateLong = (isoDate) => {
+  if (!isoDate) return "";
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return `${String(d).padStart(2, "0")} ${MONTH_NAMES[m - 1]} ${y}`;
 };
 
 const normalizeAnomalies = (items) =>
@@ -50,6 +51,9 @@ function Preview({ certId, onClose }) {
   const [manualDate, setManualDate] = useState("");
   const [headerOk, setHeaderOk] = useState(true);
   const [footerOk, setFooterOk] = useState(true);
+  const [sealOk, setSealOk] = useState(true);
+  const [sigImgOk, setSigImgOk] = useState(true);
+  const [signature, setSignature] = useState(null);
 
   const showNotice = (message, kind = "ok") => {
     setNotice(message);
@@ -79,6 +83,21 @@ function Preview({ certId, onClose }) {
       }
     );
   useEffect(() => { load(); }, [certId]);
+
+  // The Seal and Signature block shows one signature — the first enabled
+  // one (alphabetical by name) for this certificate's own company — same
+  // source and selection the PDF uses.
+  useEffect(() => {
+    if (!cert) return;
+    setSealOk(true);
+    setSigImgOk(true);
+    api.listSignatures(cert.company_id)
+      .then((list) => {
+        const enabled = list.filter((s) => s.enabled).sort((a, b) => a.name.localeCompare(b.name));
+        setSignature(enabled[0] || null);
+      })
+      .catch(() => setSignature(null));
+  }, [cert?.company_id]);
 
   async function saveRemarks() {
     const c = await api.updateRemarks(certId, remarks);
@@ -196,6 +215,9 @@ function Preview({ certId, onClose }) {
             w?.addEventListener("load", () => w.print());
           }}>Print</button>
           <a className="btn-ghost" href={api.pdfUrl(cert.id)} download>Download PDF</a>
+          <a className="btn-ghost" href={api.certificateImageUrl(cert.id)} download>
+            Download image
+          </a>
           <button className="btn-primary" onClick={onClose}>Close</button>
         </div>
 
@@ -251,20 +273,25 @@ function Preview({ certId, onClose }) {
           </div>
         )}
 
-        {/* Fixed certificate layout - mirrors certificate_format.jpeg.
-            Everything is read-only except Remarks and the date-mode below. */}
+        {/* Fixed certificate layout - mirrors certificate_format.jpeg (and
+            the PDF's full-bleed letterhead banners: edge-to-edge at the
+            page's own width, never inset within the body's padding — a
+            letterhead image with side margins reads as "floating in the
+            middle" instead of a proper full-bleed banner). Everything is
+            read-only except Remarks and the date-mode below. */}
+        {headerOk && (
+          <img
+            src={api.letterheadHeaderUrl(cert.company_id)}
+            alt="" className="w-full h-auto block"
+            onError={() => setHeaderOk(false)}
+          />
+        )}
         <div className="p-6 text-sm">
-          {headerOk && (
-            <img
-              src={api.letterheadHeaderUrl(cert.company_id)}
-              alt="" className="w-full mb-3 object-contain"
-              onError={() => setHeaderOk(false)}
-            />
-          )}
-          <h2 className="text-center font-semibold text-base">Certificate of Deduction of Tax</h2>
-          <p className="text-center text-xs">[Section 145 of the Income Tax Act 2023]</p>
+          <h2 className="text-center font-semibold text-[15px] tracking-tight">Certificate of Deduction of Tax</h2>
+          <p className="text-center text-xs text-ink/50 mt-0.5">[Section 145 of the Income Tax Act 2023]</p>
+          <hr className="border-t border-ink/20 mt-2.5 mb-3" />
 
-          <div className="flex justify-between border border-ink px-2 py-1 mt-3 font-medium">
+          <div className="flex justify-between border border-ink px-2 py-1 font-medium">
             <span>No. {cert.certificate_no}</span>
             <span>{cert.issue_date}</span>
           </div>
@@ -392,14 +419,51 @@ function Preview({ certId, onClose }) {
             </div>
           </div>
 
-          {footerOk && (
-            <img
-              src={api.letterheadFooterUrl(cert.company_id)}
-              alt="" className="w-full mt-4 object-contain"
-              onError={() => setFooterOk(false)}
-            />
-          )}
+          {/* Footer: mirrors the PDF layout exactly — one "Seal and
+              Signature" unit, flush against the right margin (the same
+              distance from the right edge as the body content's left
+              edge), stacked top to bottom: signature image, the label,
+              the issue date (DD Month YYYY), then the seal image directly
+              below the date, centered on each other within the block's
+              own width. A labeled placeholder box stands in for either
+              image if it isn't configured yet. */}
+          <div className="mt-6 pt-3 border-t border-ink flex justify-end">
+            <div className="w-48 flex flex-col items-center text-center">
+              {signature && sigImgOk ? (
+                <img
+                  src={api.signatureImageUrl(cert.company_id, signature.id)}
+                  alt={`${signature.name} signature`}
+                  className="h-10 object-contain"
+                  onError={() => setSigImgOk(false)}
+                />
+              ) : (
+                <div className="w-28 h-10 border border-dashed border-ink/30 text-ink/40 text-[10px] flex items-center justify-center">
+                  Signature
+                </div>
+              )}
+              <p className="text-xs font-semibold mt-1.5">Seal and Signature</p>
+              <p className="text-xs">{fmtDateLong(cert.issue_date)}</p>
+              {sealOk ? (
+                <img
+                  src={api.companySealUrl(cert.company_id)}
+                  alt="" className="h-10 mt-1.5 object-contain"
+                  onError={() => setSealOk(false)}
+                />
+              ) : (
+                <div className="w-20 h-10 mt-1.5 border border-dashed border-ink/30 text-ink/40 text-[10px] flex items-center justify-center">
+                  Seal
+                </div>
+              )}
+            </div>
+          </div>
         </div>
+        {footerOk && (
+          <img
+            src={api.letterheadFooterUrl(cert.company_id)}
+            alt="" className="w-full h-auto block rounded-b-lg"
+            onError={() => setFooterOk(false)}
+          />
+        )}
       </div>
     </div>
   );
@@ -566,8 +630,6 @@ export default function CertificateIssue() {
   const [previewId, setPreviewId] = useState(null);
   const [notice, setNotice] = useState(null);
   const [showVendorModal, setShowVendorModal] = useState(false);
-  const [signatures, setSignatures] = useState([]);
-  const [signatureId, setSignatureId] = useState("");
   const [bulkAnomalies, setBulkAnomalies] = useState(null);
   const [bulkChecking, setBulkChecking] = useState(false);
   const [bulkSendResults, setBulkSendResults] = useState(null);
@@ -579,48 +641,23 @@ export default function CertificateIssue() {
   };
   const loadPending = () => {
     if (!companyId) return Promise.resolve();
-    return api.pendingGroupings(companyId).then(setPending);
+    return api.pendingGroupings(companyId, filters).then(setPending);
   };
 
   useEffect(() => { search(); }, [page, companyId]);
   useEffect(() => { loadPending(); }, [companyId]);
-  useEffect(() => {
-    if (!companyId) { setSignatures([]); return; }
-    api.listSignatures(companyId).then((list) => {
-      setSignatures(list);
-      const def = list.find((s) => s.is_default);
-      setSignatureId(def ? String(def.id) : "");
-    });
-  }, [companyId]);
-
-  const filteredPending = useMemo(() => {
-    const tin = filters.tin.trim().toLowerCase();
-    const bin = filters.bin.trim().toLowerCase();
-    const supplierName = filters.supplier_name.trim().toLowerCase();
-    const dateFrom = filters.date_from;
-    const dateTo = filters.date_to;
-
-    return pending.filter((g) => {
-      const matchesTin = !tin || String(g.tin || "").toLowerCase().includes(tin);
-      const matchesBin = !bin || String(g.bin || "").toLowerCase().includes(bin);
-      const matchesName =
-        !supplierName ||
-        String(g.supplier_name || "").toLowerCase().includes(supplierName);
-      const matchesDate = inDateRange(g.payment_from, g.payment_to, dateFrom, dateTo);
-      return matchesTin && matchesBin && matchesName && matchesDate;
-    });
-  }, [filters.bin, filters.date_from, filters.date_to, filters.supplier_name, filters.tin, pending]);
 
   function applyFilters() {
     setPage(1);
     search(1);
+    loadPending();
     setBulkAnomalies(null);
     setBulkSendResults(null);
   }
 
   async function generateOne(g) {
     try {
-      const c = await api.generate(companyId, g.tin, g.period, signatureId ? Number(signatureId) : undefined);
+      const c = await api.generate(companyId, g.tin, g.period);
       setNotice(`Generated ${c.certificate_no} for ${g.supplier_name}`);
       await Promise.all([search(), loadPending()]);
       setPreviewId(c.id);
@@ -628,11 +665,8 @@ export default function CertificateIssue() {
   }
 
   async function generateBulk() {
-    const items = filteredPending.filter((g) => checked[`${g.tin}|${g.period}`])
-      .map((g) => ({
-        company_id: companyId, tin: g.tin, period: g.period,
-        signature_id: signatureId ? Number(signatureId) : undefined,
-      }));
+    const items = pending.filter((g) => checked[`${g.tin}|${g.period}`])
+      .map((g) => ({ company_id: companyId, tin: g.tin, period: g.period }));
     if (!items.length) return;
     const res = await api.generateBulk(items);
     const ok = res.filter((r) => r.ok).length;
@@ -694,16 +728,6 @@ export default function CertificateIssue() {
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <h1 className="text-xl font-semibold mr-auto">Certificate Issue</h1>
-        {signatures.length > 0 && (
-          <div className="flex items-center gap-2 text-sm">
-            <span className="label !mb-0">Signature</span>
-            <select className="input !py-1.5 !w-48" value={signatureId} onChange={(e) => setSignatureId(e.target.value)}>
-              {signatures.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}{s.is_default ? " (default)" : ""}</option>
-              ))}
-            </select>
-          </div>
-        )}
         <button className="btn-primary" onClick={() => setShowVendorModal(true)}>+ Add Vendor</button>
       </div>
       {notice && <p className="text-sm text-ledger">{notice}</p>}
@@ -721,7 +745,7 @@ export default function CertificateIssue() {
       {/* Pending groupings with per-row + bulk generation */}
       <div className="card">
         <div className="px-5 py-3 border-b border-rule flex items-center">
-          <h2 className="font-medium mr-auto">Pending <span className="text-ink/40 font-normal">({filteredPending.length})</span></h2>
+          <h2 className="font-medium mr-auto">Pending <span className="text-ink/40 font-normal">({pending.length})</span></h2>
           <button className="btn-primary" onClick={generateBulk}>Generate selected</button>
         </div>
         <table className="w-full text-sm">
@@ -733,7 +757,7 @@ export default function CertificateIssue() {
             </tr>
           </thead>
           <tbody>
-            {filteredPending.slice(0, 15).map((g) => {
+            {pending.slice(0, 15).map((g) => {
               const key = `${g.tin}|${g.period}`;
               return (
                 <tr key={key} className="border-b border-rule/60">
@@ -752,13 +776,13 @@ export default function CertificateIssue() {
                 </tr>
               );
             })}
-            {filteredPending.length === 0 && (
+            {pending.length === 0 && (
               <tr><td colSpan={9} className="p-5 text-ink/50">No pending groupings match these filters.</td></tr>
             )}
           </tbody>
         </table>
-        {filteredPending.length > 15 && (
-          <p className="px-5 py-2 text-xs text-ink/50">{filteredPending.length - 15} more. Narrow with the search above.</p>
+        {pending.length > 15 && (
+          <p className="px-5 py-2 text-xs text-ink/50">{pending.length - 15} more. Narrow with the search above.</p>
         )}
       </div>
 

@@ -9,6 +9,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 from openpyxl import Workbook
 from pydantic import ValidationError
 from sqlalchemy import create_engine
@@ -17,7 +18,6 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401 — register tables
 from app.api.routes import (
-    adjust_transaction,
     bulk_anomaly_check,
     bulk_dispatch,
     onboard_supplier,
@@ -31,14 +31,15 @@ from app.models.entities import (
     DispatchStatus,
     DispatchJob,
     PartyType,
+    Signature,
     Supplier,
     SupplierContact,
     TaxRate,
     Transaction,
 )
-from app.schemas import BulkDispatchRequest, BulkFilterRequest, SupplierCreate, TransactionAdjust
+from app.schemas import BulkDispatchRequest, BulkFilterRequest, SupplierCreate
 from app.services import rate_hook
-from app.services.aggregation import build_certificate_data
+from app.services.aggregation import build_certificate_data, list_groupings
 from app.services.amount_in_words import amount_in_words
 from app.services.certificate_generator import (
     GenerationError,
@@ -50,7 +51,6 @@ from app.services.dispatch.email_sender import send_test_email
 from app.services.dispatch.whatsapp_sender import send_certificate_whatsapp
 from app.services.excel_import import (
     fiscal_year_for,
-    import_challan_file,
     import_depot_workbook,
     parse_month_label,
 )
@@ -398,6 +398,25 @@ def test_letterhead_resolves_per_certificates_own_company(db, company, company2,
     assert os.path.exists(path1) and os.path.exists(path2)
 
 
+# --------------------------------- Share-ready certificate image export -----
+def test_certificate_image_generated_alongside_pdf(db, company, sample_xlsx):
+    """Every (re)generation also rasterizes the PDF into a JPEG for
+    WhatsApp/email sharing, sized to avoid WhatsApp's own re-compression
+    and to stay well under typical attachment limits."""
+    from PIL import Image
+
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "444455556666", "2025-26")
+
+    assert cert.image_path and os.path.exists(cert.image_path)
+    size_bytes = os.path.getsize(cert.image_path)
+    assert 0 < size_bytes < 2 * 1024 * 1024  # under the 2 MB target
+
+    with Image.open(cert.image_path) as img:
+        assert img.format == "JPEG"
+        assert max(img.size) in range(1700, 1901)  # ~1800px long edge
+
+
 # ------------------------------------------------ Offline dispatch ----------
 def test_offline_queue_blocks_then_overrides_then_drains(db, company, sample_xlsx, monkeypatch):
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
@@ -672,63 +691,6 @@ def test_supplier_onboarding_creates_then_upserts_by_tin(db, company):
     assert db.query(Supplier).filter_by(tin="555566667777").count() == 1
 
 
-# ------------------------------------------ Challan upload + override -------
-@pytest.fixture
-def challan_xlsx(tmp_path):
-    """Challan file auto-filling the Alpha Traders December'25 row created by
-    sample_xlsx, including the adjusted bill/TDS amounts (never VDS)."""
-    wb = Workbook()
-    ws = wb.active
-    headers = ["TIN", "Month", "Challan No", "Challan Date", "Total Challan Amount",
-              "Section", "Sum of Bill Amount", "Sum of TDS", "Sum of VDS"]
-    ws.append(headers)
-    ws.append(["111122223333", "December'25", "2526-999", "20/01/2026",
-               99000, "90", 101000, 5100, -5000])
-    ws.append(["000000000000", "December'25", "2526-000", "20/01/2026",
-               1000, "90", 1000, 100, -50])  # no matching transaction
-    path = tmp_path / "challan.xlsx"
-    wb.save(path)
-    return str(path)
-
-
-def test_challan_import_autofills_amounts_and_returns_updated_ids(db, company, sample_xlsx, challan_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
-    batch, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx", company.id)
-    assert batch.ok_rows == 1
-    assert batch.error_rows == 1  # unmatched TIN row
-    assert any("No transaction matches" in e.message for e in batch.errors)
-
-    txns = db.query(Transaction).filter(Transaction.id.in_(updated_ids)).all()
-    assert len(txns) == 1
-    t = txns[0]
-    assert t.challan_no == "2526-999"
-    assert t.total_challan_amount == 99000
-    assert t.sum_of_bill_amount == 101000
-    assert t.sum_of_tds == 5100
-    assert t.sum_of_vds is None  # never auto-populated (item 7)
-
-
-def test_challan_import_scoped_to_company(db, company, company2, sample_xlsx, challan_xlsx):
-    """A challan file only auto-fills transactions within the given company."""
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company2.id)
-    _, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx", company.id)
-    touched = db.query(Transaction).filter(Transaction.id.in_(updated_ids)).all()
-    assert touched and all(t.company_id == company.id for t in touched)
-
-
-def test_transaction_manual_override_after_autofill(db, company, sample_xlsx, challan_xlsx):
-    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
-    _, updated_ids = import_challan_file(db, challan_xlsx, "challan.xlsx", company.id)
-    txn_id = updated_ids[0]
-
-    adjusted = adjust_transaction(txn_id, TransactionAdjust(sum_of_tds=5200, challan_no="2526-999-CORRECTED"), db)
-    assert adjusted.sum_of_tds == 5200
-    assert adjusted.challan_no == "2526-999-CORRECTED"
-    # Fields not included in the override are left untouched.
-    assert adjusted.total_challan_amount == 99000
-
-
 # --------------------------------------- Signature/seal split (item 8) ------
 def test_missing_seal_anomaly_satisfied_by_company_seal(db, company, sample_xlsx):
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
@@ -744,6 +706,99 @@ def test_missing_seal_anomaly_satisfied_by_company_seal(db, company, sample_xlsx
     db.commit()
     codes = {a.code for a in check_certificate(db, cert, org)}
     assert "MISSING_SEAL" not in codes
+
+
+# ---------------------------------- Multiple named signatures (items 2/5) ---
+def test_signature_defaults_enabled_and_renders_on_certificate(db, company, sample_xlsx, tmp_path):
+    sig_path = tmp_path / "sig1.png"
+    sig_path.write_bytes(_TINY_PNG)
+    sig = Signature(company_id=company.id, name="Md. Rahim Uddin",
+                    designation="Head of Tax & VAT", image_path=str(sig_path))
+    db.add(sig)
+    db.commit()
+    assert sig.enabled is True  # new signatures default to enabled
+
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    cert = generate_certificate(db, company.id, "444455556666", "2025-26")
+    path = render_certificate_pdf(db, cert)  # must not raise with a signature row
+    assert os.path.exists(path)
+
+
+def test_disabled_signature_excluded_from_enabled_query(db, company, tmp_path):
+    """Every Signature flagged enabled renders on every certificate for the
+    company — disabling one removes it from that set immediately."""
+    sig_path = tmp_path / "sig2.png"
+    sig_path.write_bytes(_TINY_PNG)
+    shown = Signature(company_id=company.id, name="Shown", image_path=str(sig_path))
+    hidden = Signature(company_id=company.id, name="Hidden", image_path=str(sig_path), enabled=False)
+    db.add_all([shown, hidden])
+    db.commit()
+
+    visible = (
+        db.query(Signature)
+        .filter(Signature.company_id == company.id, Signature.enabled.is_(True))
+        .order_by(Signature.name)
+        .all()
+    )
+    assert [s.name for s in visible] == ["Shown"]
+
+
+def test_delete_signature_route(db, company, tmp_path):
+    from app.main import app
+    from app.database import get_db
+
+    sig_path = tmp_path / "sig3.png"
+    sig_path.write_bytes(_TINY_PNG)
+    sig = Signature(company_id=company.id, name="To Delete", image_path=str(sig_path))
+    db.add(sig)
+    db.commit()
+    sig_id = sig.id
+
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        client = TestClient(app)
+        resp = client.delete(f"/api/companies/{company.id}/signatures/{sig_id}")
+        assert resp.status_code == 200
+        assert db.get(Signature, sig_id) is None
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ------------------------------------------------ Logo removal (item 1) -----
+def test_company_logo_route_removed(db, company):
+    """The per-company logo feature (upload + certificate rendering) has
+    been removed entirely, not just hidden — the route no longer exists."""
+    from app.main import app
+    from app.database import get_db
+
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        client = TestClient(app)
+        resp = client.get(f"/api/companies/{company.id}/logo")
+        assert resp.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_company_has_no_logo_path_column():
+    assert not hasattr(Company, "logo_path")
+
+
+# --------------------------------------- Pending groupings search (item 8) --
+def test_pending_groupings_filters_match_certificate_search(db, company, sample_xlsx):
+    """Pending now uses the same server-side filters as certificate search
+    instead of a looser client-side substring match, so a query like "R.S"
+    can no longer false-positive match an unrelated supplier."""
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+
+    by_name = list_groupings(db, company.id, supplier_name="Beta")
+    assert {r["tin"] for r in by_name} == {"444455556666"}
+
+    by_tin = list_groupings(db, company.id, tin="1111")
+    assert {r["tin"] for r in by_tin} == {"111122223333"}
+
+    by_bin = list_groupings(db, company.id, bin="nonexistent-bin")
+    assert by_bin == []
 
 
 # ------------------------------------ Configurable number format (item 9) ---
@@ -800,3 +855,31 @@ def test_number_format_independent_per_company(tmp_path):
     assert n1a == "ACME/2025-26/1"
     assert n2a == "Beta/2025-26/1"  # independent sequence, also starts at 1
     assert n1b == "ACME/2025-26/2"
+
+
+# -------------------------------------------- Route ordering (item 11) ------
+def test_export_route_not_shadowed_by_cert_id_route(db, company, sample_xlsx):
+    """Regression test: /certificates/export must be registered before
+    /certificates/{cert_id}, or FastAPI's registration-order path matching
+    swallows "export" as a cert_id and 422s (found via live manual testing)."""
+    from app.main import app
+    from app.database import get_db
+
+    import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
+    generate_certificate(db, company.id, "444455556666", "2025-26")
+
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        client = TestClient(app)
+        resp = client.get("/api/certificates/export", params={"company_id": company.id})
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"] == (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # The ordinary get-by-id route must still resolve correctly too.
+        cert_id = db.query(Certificate).first().id
+        resp2 = client.get(f"/api/certificates/{cert_id}")
+        assert resp2.status_code == 200
+        assert resp2.json()["id"] == cert_id
+    finally:
+        app.dependency_overrides.clear()

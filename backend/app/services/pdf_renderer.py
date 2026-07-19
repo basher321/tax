@@ -2,7 +2,12 @@
 
 The layout is LOCKED — it reproduces certificate_format.jpeg exactly:
 
-  * Title + "[Section 145 of the Income Tax Act 2023]" header
+  * Company letterhead header (if uploaded), drawn full-bleed edge-to-edge
+    across the physical page width — like branded letterhead stationery,
+    not inset within the body's margins — with the title block starting
+    in the clear space below it.
+  * Title + "[Section 145 of the Income Tax Act 2023]" header, with a thin
+    rule separating it from the "No." row
   * "No." row with certificate number left and issue date right
   * Payee block (rows 1-5): name, address, 12-digit TIN yes/no boxes,
     E-TIN + period line
@@ -13,14 +18,31 @@ The layout is LOCKED — it reproduces certificate_format.jpeg exactly:
     Total amount in the challan | Amount relating to this certificate |
     Remarks + Total row (total of "amount relating" only)
   * Amount In word + certification line
-  * Footer: officer Name / Designation / Email at left; "Signature and
-    seal" block at right — signature image above the label, the issue date
-    below the label, and the seal image below the date (bottom-most).
-  * Company letterhead: header image (if uploaded) before the title, footer
-    image (if uploaded) after the officer/signature block — both resolved
-    from the certificate's own company, never the currently-active UI company.
+  * Footer block, pinned to a fixed position at the bottom of the page (a
+    dedicated ReportLab Frame, not just appended after the content — so it
+    never "floats" up on short certificates or collides with content on
+    long ones): one "Seal and Signature" unit, flush against the right
+    margin (mirroring the left margin's distance from the page edge),
+    stacked top to bottom — signature image, the "Seal and Signature"
+    label, the issue date (DD Month YYYY), then the seal image directly
+    below the date, all centered on each other within the block's own
+    column. The signature shown is the first enabled Signature for this
+    cert's company (alphabetical by name); a labeled placeholder box
+    stands in for either image if it isn't configured yet.
+  * Company letterhead footer (if uploaded), drawn full-bleed edge-to-edge
+    across the bottom of the physical page, below the signature/seal row's
+    margin-bound space.
+  * Company letterhead header/footer are always resolved from the
+    certificate's own company, never the currently-active UI company.
 
-No runtime configuration of this layout is exposed anywhere.
+No company/certificate logo is rendered anywhere in this template — that
+feature has been removed. No runtime configuration of this layout is
+exposed anywhere.
+
+Alongside the PDF, a share-ready JPEG (Certificate.image_path) is rasterized
+from that same PDF file on every (re)generation — not a second independent
+render — so on-screen PDF, print, WhatsApp, and email image sharing all
+trace back to one source layout and stay pixel-identical to each other.
 """
 import os
 from datetime import date
@@ -30,12 +52,17 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (
-    BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer, Table,
-    TableStyle, Image as RLImage, KeepTogether,
+    BaseDocTemplate, Frame, FrameBreak, HRFlowable, PageTemplate, Paragraph,
+    Spacer, Table, TableStyle, Image as RLImage,
 )
 from reportlab.lib.utils import ImageReader
 
 from ..config import get_settings
+from ..models.entities import Signature
+
+# Fixed height reserved for the bottom-pinned footer frame (signature row +
+# officer/seal block + optional letterhead footer image).
+_FOOTER_H = 70 * mm
 
 
 def _fitted_image(path: str, max_w_mm: float, max_h_mm: float) -> "RLImage | None":
@@ -53,10 +80,39 @@ def _fitted_image(path: str, max_w_mm: float, max_h_mm: float) -> "RLImage | Non
 _BASE = "Helvetica"
 _BOLD = "Helvetica-Bold"
 
-P_TITLE = ParagraphStyle("t", fontName=_BOLD, fontSize=13, alignment=1)
-P_SUB = ParagraphStyle("s", fontName=_BASE, fontSize=9, alignment=1)
+P_TITLE = ParagraphStyle("t", fontName=_BOLD, fontSize=15, alignment=1,
+                         textColor=colors.Color(0.08, 0.08, 0.08), spaceAfter=2)
+P_SUB = ParagraphStyle("s", fontName=_BASE, fontSize=9, alignment=1,
+                       textColor=colors.Color(0.4, 0.4, 0.4))
 P_CELL = ParagraphStyle("c", fontName=_BASE, fontSize=8, leading=10)
 P_CELL_B = ParagraphStyle("cb", fontName=_BOLD, fontSize=8, leading=10)
+P_CENTER = ParagraphStyle("ctr", parent=P_CELL, alignment=1)
+P_CENTER_B = ParagraphStyle("ctrb", parent=P_CELL_B, alignment=1)
+P_PLACEHOLDER = ParagraphStyle("ph", parent=P_CENTER, textColor=colors.Color(0.6, 0.6, 0.6))
+
+# WhatsApp/email share image: long enough edge to avoid WhatsApp's own
+# aggressive re-compression, small enough to stay well under typical
+# attachment limits.
+_SHARE_IMAGE_LONG_EDGE_PX = 1800
+_SHARE_IMAGE_JPEG_QUALITY = 88
+
+
+def _export_share_image(pdf_path: str, out_path: str) -> None:
+    """Rasterize the just-built PDF's first page into a JPEG — from the
+    same PDF file, not a second independent render, so it is pixel-for-
+    pixel identical to the PDF (same fonts, same layout, same right-aligned
+    Seal and Signature block)."""
+    import fitz  # local import: only this one call needs it
+
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc[0]
+        long_edge_pt = max(page.rect.width, page.rect.height)
+        zoom = _SHARE_IMAGE_LONG_EDGE_PX / long_edge_pt
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        pix.save(out_path, jpg_quality=_SHARE_IMAGE_JPEG_QUALITY)
+    finally:
+        doc.close()
 
 
 def _fmt_date(d: date | None) -> str:
@@ -65,6 +121,10 @@ def _fmt_date(d: date | None) -> str:
 
 def _fmt_issue(d: date) -> str:
     return d.strftime("%d-%b-%y")  # 21-Apr-26
+
+
+def _fmt_date_long(d: date) -> str:
+    return d.strftime("%d %B %Y")  # 14 March 2025 — bottom-section Seal/Signature date only
 
 
 def _fmt_amt(v: float | None, decimals_if_needed=True) -> str:
@@ -83,6 +143,44 @@ def _period_label(d_from: date | None, d_to: date | None) -> str:
     return ""
 
 
+def _placeholder_box(label: str, w_mm: float, h_mm: float) -> Table:
+    """A clearly-marked empty box standing in for a not-yet-uploaded
+    signature/seal image, so the layout reads correctly before either is
+    configured in Settings."""
+    box = Table([[Paragraph(label, P_PLACEHOLDER)]],
+               colWidths=[w_mm * mm], rowHeights=[h_mm * mm])
+    box.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.Color(0.7, 0.7, 0.7)),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return box
+
+
+_MAX_BLEED_H = 55 * mm  # letterhead banners never eat more than this much page height
+
+
+def _bleed_box(path: str, page_w: float) -> tuple[float, float, float] | None:
+    """Full-bleed placement for a letterhead banner: spans the entire
+    physical page width edge-to-edge (like real branded stationery — no
+    content margin on the sides), at its natural aspect ratio, capped to
+    _MAX_BLEED_H. Returns (x, width, height) in points, or None if the
+    image can't be read."""
+    try:
+        iw, ih = ImageReader(path).getSize()
+    except Exception:
+        return None
+    if not iw or not ih:
+        return None
+    height = page_w * (ih / iw)
+    if height <= _MAX_BLEED_H:
+        return 0.0, page_w, height
+    # Unusually tall/narrow upload: fall back to fitting the height cap,
+    # centered, rather than letting it swallow the page.
+    width = _MAX_BLEED_H * (iw / ih)
+    return (page_w - width) / 2, width, _MAX_BLEED_H
+
+
 def render_certificate_pdf(db, cert) -> str:
     """Render a Certificate ORM object (with lines loaded) to PDF; returns path."""
     from .certificate_generator import get_org_settings  # local import: no cycle at import time
@@ -95,46 +193,61 @@ def render_certificate_pdf(db, cert) -> str:
     safe_no = (cert.certificate_no or f"cert-{cert.id}").replace("/", "_")
     path = os.path.join(out_dir, f"{safe_no}.pdf")
 
+    page_w, page_h = A4
+
+    header_path = (company.letterhead_header_path
+                  if company and company.letterhead_header_path
+                  and os.path.exists(company.letterhead_header_path) else None)
+    footer_path = (company.letterhead_footer_path
+                  if company and company.letterhead_footer_path
+                  and os.path.exists(company.letterhead_footer_path) else None)
+    header_box = _bleed_box(header_path, page_w) if header_path else None
+    footer_box = _bleed_box(footer_path, page_w) if footer_path else None
+    # A small gap between the bleed banner and the margin-bound body content,
+    # so text never sits flush against the artwork's edge.
+    header_reserve = (header_box[2] + 3 * mm) if header_box else 0
+    footer_reserve = (footer_box[2] + 3 * mm) if footer_box else 0
+
+    def _draw_letterhead(canvas, _doc):
+        canvas.saveState()
+        if header_box:
+            x, w, h = header_box
+            canvas.drawImage(header_path, x, page_h - h, width=w, height=h,
+                             preserveAspectRatio=True, anchor="n", mask="auto")
+        if footer_box:
+            x, w, h = footer_box
+            canvas.drawImage(footer_path, x, 0, width=w, height=h,
+                             preserveAspectRatio=True, anchor="s", mask="auto")
+        canvas.restoreState()
+
     doc = BaseDocTemplate(
         path, pagesize=A4,
         leftMargin=12 * mm, rightMargin=12 * mm,
         topMargin=10 * mm, bottomMargin=10 * mm,
         title=f"Certificate of Deduction of Tax {cert.certificate_no}",
     )
-    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="f")
-    doc.addPageTemplates([PageTemplate(id="page", frames=[frame])])
+    content_frame = Frame(
+        doc.leftMargin, doc.bottomMargin + _FOOTER_H + footer_reserve,
+        doc.width, doc.height - _FOOTER_H - header_reserve - footer_reserve,
+        id="content",
+    )
+    footer_frame = Frame(
+        doc.leftMargin, doc.bottomMargin + footer_reserve, doc.width, _FOOTER_H,
+        id="footer",
+    )
+    doc.addPageTemplates([PageTemplate(id="page", frames=[content_frame, footer_frame],
+                                       onPage=_draw_letterhead)])
 
     W = doc.width
     story = []
 
-    # ---------- Company letterhead header (this cert's own company) ----------
-    if company and company.letterhead_header_path and os.path.exists(company.letterhead_header_path):
-        header_img = _fitted_image(company.letterhead_header_path, W / mm, 28)
-        if header_img is not None:
-            header_img.hAlign = "CENTER"
-            story.append(header_img)
-            story.append(Spacer(1, 2 * mm))
-
-    # ---------- Header (repeated once at document start, as in the format) ----
-    title_block = [
-        Paragraph("Certificate of Deduction of Tax", P_TITLE),
-        Paragraph("[Section 145 of the Income Tax Act 2023]", P_SUB),
-    ]
-    logo_path = (company.logo_path if company and company.logo_path else org.logo_path)
-    logo_img = (_fitted_image(logo_path, 24, 12)
-                if logo_path and os.path.exists(logo_path) else None)
-    if logo_img:
-        header = Table([[logo_img, title_block, ""]],
-                       colWidths=[26 * mm, W - 52 * mm, 26 * mm])
-        header.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ]))
-        story.append(header)
-    else:
-        story.extend(title_block)
-    story.append(Spacer(1, 2 * mm))
+    # ---------- Title (no logo — removed) -------------------------------------
+    story.append(Paragraph("Certificate of Deduction of Tax", P_TITLE))
+    story.append(Paragraph("[Section 145 of the Income Tax Act 2023]", P_SUB))
+    story.append(Spacer(1, 2.5 * mm))
+    story.append(HRFlowable(width="100%", thickness=1,
+                            color=colors.Color(0.75, 0.75, 0.75),
+                            spaceBefore=0, spaceAfter=3 * mm))
 
     no_tbl = Table(
         [["No.", cert.certificate_no or "", _fmt_issue(cert.issue_date)]],
@@ -153,8 +266,8 @@ def render_certificate_pdf(db, cert) -> str:
 
     supplier = cert.supplier
     has_tin = cert.has_12_digit_tin
-    yes_mark = "\u2713" if has_tin else ""
-    no_mark = "" if has_tin else "\u2713"
+    yes_mark = "✓" if has_tin else ""
+    no_mark = "" if has_tin else "✓"
 
     payee_rows = [
         ["1", Paragraph("<b>Name of Payee:</b>", P_CELL),
@@ -301,78 +414,75 @@ def render_certificate_pdf(db, cert) -> str:
         ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
     ]))
     story.append(aiw)
-    story.append(Spacer(1, 8 * mm))
 
-    # ---------- Footer: officer block + signature/seal stack + auto date -----
-    # Resolve signature: the certificate's own chosen Signature (set at
-    # generation time), else fall back to the legacy OrgSettings field.
-    signature_path = None
-    if cert.signature and cert.signature.image_path and os.path.exists(cert.signature.image_path):
-        signature_path = cert.signature.image_path
-    elif org.signature_path and os.path.exists(org.signature_path):
-        signature_path = org.signature_path
+    # ---------- Footer, pinned to a fixed frame at the bottom of the page ----
+    # One combined "Seal and Signature" unit, centered as a single block:
+    # signature image, then the label, then the issue date (DD Month YYYY),
+    # then the seal image directly below the date. If either image isn't
+    # configured yet, a labeled placeholder box stands in for it.
+    story.append(FrameBreak())
 
-    # Resolve seal: this cert's own company, else the legacy OrgSettings field.
+    signature = (
+        db.query(Signature)
+        .filter(Signature.company_id == cert.company_id, Signature.enabled.is_(True))
+        .order_by(Signature.name)
+        .first()
+    )
+
+    # Seal resolution: this cert's own company, else the legacy OrgSettings
+    # field, else (only if nothing at all is configured) the old combined
+    # seal+signature image kept for backwards compatibility.
     seal_path = None
     if company and company.seal_path and os.path.exists(company.seal_path):
         seal_path = company.seal_path
     elif org.seal_path and os.path.exists(org.seal_path):
         seal_path = org.seal_path
+    elif not signature and org.seal_signature_path and os.path.exists(org.seal_signature_path):
+        seal_path = org.seal_signature_path
 
-    seal_cell = []
-    if signature_path:
-        sig_img = _fitted_image(signature_path, 40, 16)
-        if sig_img is not None:
-            sig_img.hAlign = "CENTER"
-            seal_cell.append(sig_img)
-            seal_cell.append(Spacer(1, 1 * mm))
-    elif not seal_path and org.seal_signature_path and os.path.exists(org.seal_signature_path):
-        # Fully legacy: neither a split signature nor a split seal is on
-        # file anywhere — fall back to the old combined image above the label.
-        img = _fitted_image(org.seal_signature_path, 45, 22)
-        if img is not None:
-            img.hAlign = "CENTER"
-            seal_cell.append(img)
-            seal_cell.append(Spacer(1, 1 * mm))
-    seal_cell.append(Paragraph("<b>Signature and seal</b>",
-                               ParagraphStyle("ss", parent=P_CELL_B, alignment=1)))
-    seal_cell.append(Paragraph(_fmt_issue(cert.issue_date),
-                               ParagraphStyle("sd", parent=P_CELL, alignment=1)))
-    if seal_path:
-        # Seal renders below the date, at the very bottom of the block.
-        seal_cell.append(Spacer(1, 1 * mm))
-        seal_img = _fitted_image(seal_path, 30, 16)
-        if seal_img is not None:
-            seal_img.hAlign = "CENTER"
-            seal_cell.append(seal_img)
+    block = []
+    sig_img = (_fitted_image(signature.image_path, 40, 16)
+              if signature and signature.image_path and os.path.exists(signature.image_path)
+              else None)
+    if sig_img is not None:
+        sig_img.hAlign = "CENTER"
+        block.append(sig_img)
+    else:
+        block.append(_placeholder_box("Signature", 40, 16))
+    block.append(Spacer(1, 1.5 * mm))
+    block.append(Paragraph("<b>Seal and Signature</b>", P_CENTER_B))
+    block.append(Paragraph(_fmt_date_long(cert.issue_date), P_CENTER))
+    block.append(Spacer(1, 1.5 * mm))
+    seal_img = _fitted_image(seal_path, 30, 16) if seal_path else None
+    if seal_img is not None:
+        seal_img.hAlign = "CENTER"
+        block.append(seal_img)
+    else:
+        block.append(_placeholder_box("Seal", 30, 16))
 
-    officer_name = (company and company.officer_name) or org.officer_name or ""
-    officer_designation = (company and company.officer_designation) or org.officer_designation or ""
-    officer_email = (company and company.officer_email) or org.officer_email or ""
-
-    footer = Table(
-        [[
-            [Paragraph(f"<b>Name:</b> {officer_name}", P_CELL),
-             Paragraph(f"<b>Designation:</b> {officer_designation}", P_CELL),
-             Paragraph(f"<b>Email:</b> {officer_email}", P_CELL)],
-            seal_cell,
-        ]],
-        colWidths=[W - 60 * mm, 60 * mm],
-    )
+    # The block sits flush against the right margin (the same distance from
+    # the page's right edge as the body content's left edge is from the
+    # left, since the footer frame already respects both side margins) —
+    # a narrow right-hand column holds it, elements centered on each other
+    # within that column so the stack reads as one clean unit.
+    BLOCK_W = 55 * mm
+    footer = Table([["", block]], colWidths=[W - BLOCK_W, BLOCK_W])
     footer.setStyle(TableStyle([
+        ("ALIGN", (1, 0), (1, 0), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
         ("LINEABOVE", (0, 0), (-1, 0), 0.75, colors.black),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
     ]))
-    story.append(KeepTogether([footer]))
-
-    # ---------- Company letterhead footer (this cert's own company) ----------
-    if company and company.letterhead_footer_path and os.path.exists(company.letterhead_footer_path):
-        story.append(Spacer(1, 3 * mm))
-        footer_img = _fitted_image(company.letterhead_footer_path, W / mm, 22)
-        if footer_img is not None:
-            footer_img.hAlign = "CENTER"
-            story.append(footer_img)
+    story.append(footer)
 
     doc.build(story)
+
+    # Share-ready image (WhatsApp/email), rasterized from this same PDF so
+    # it's guaranteed to match it exactly.
+    image_dir = os.path.join(settings.storage_dir, "certificate-images")
+    os.makedirs(image_dir, exist_ok=True)
+    image_path = os.path.join(image_dir, f"{safe_no}.jpg")
+    _export_share_image(path, image_path)
+    cert.image_path = image_path
+
     return path

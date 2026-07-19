@@ -25,7 +25,7 @@ const PAGE_TITLES = {
   },
   "/import": {
     title: "Import",
-    description: "Load depot and challan workbooks with row-level validation.",
+    description: "Load Depot-SCB workbooks with row-level validation.",
   },
   "/certificates": {
     title: "Certificate Issue",

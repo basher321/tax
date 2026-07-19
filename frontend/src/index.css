@@ -84,3 +84,12 @@ table {
 .skeleton {
   @apply animate-pulse bg-ink/[0.06] rounded;
 }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-toast-in {
+  animation: toast-in 0.15s ease-out;
+}

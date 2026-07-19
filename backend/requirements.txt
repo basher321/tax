@@ -7,6 +7,7 @@ pydantic-settings>=2.2
 pandas>=2.2
 openpyxl>=3.1
 reportlab>=4.1
+pymupdf>=1.24  # rasterizes the generated PDF into a share-ready JPEG (WhatsApp/email)
 httpx>=0.27
 python-multipart>=0.0.9
 psycopg2-binary>=2.9 ; python_version >= "3.10"

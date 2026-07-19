@@ -61,8 +61,6 @@ from ..schemas import (
     SignatureUpdate,
     SupplierCreate,
     TinStatusUpdate,
-    TransactionAdjust,
-    TransactionOut,
     DatabaseResetRequest,
     SupplierOut,
     SupplierUpdate,
@@ -73,7 +71,6 @@ from ..services.certificate_generator import (
     GenerationError,
     generate_certificate,
     get_company,
-    get_default_company,
     get_org_settings,
     regenerate_pdf,
 )
@@ -82,7 +79,6 @@ from ..services.dispatch.email_sender import send_test_email, verify_job_sig
 from ..services.dispatch.whatsapp_sender import verify_certificate_sig
 from ..services.excel_export import export_certificates_to_excel
 from ..services.excel_import import (
-    import_challan_file,
     import_depot_workbook,
     load_depot_sheet,
 )
@@ -171,60 +167,29 @@ def list_batches(company_id: int | None = None, db: Session = Depends(get_db)):
     return q.order_by(ImportBatch.created_at.desc()).limit(50).all()
 
 
-@router.post("/import/challan")
-def upload_challan(company_id: int = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Challan upload: auto-fills challan no/date/amount + adjusted bill/TDS
-    (never VDS) on matching transactions within the given company. Returns
-    the affected rows for manual override via PATCH /transactions/{id}."""
-    if not (file.filename or "").lower().endswith((".xlsx", ".xls")):
-        raise HTTPException(422, "Upload an .xlsx or .xls workbook")
-    path = _save_upload(file)
-    try:
-        batch, updated_ids = import_challan_file(db, path, file.filename or "upload.xlsx", company_id)
-        updated = (
-            db.query(Transaction).filter(Transaction.id.in_(updated_ids)).all()
-            if updated_ids else []
-        )
-        out = ImportBatchOut.model_validate(batch).model_dump()
-        out["updated_transactions"] = [
-            TransactionOut.model_validate(t).model_dump() for t in updated
-        ]
-        return out
-    except (BadZipFile, ValueError) as e:
-        db.rollback()
-        raise HTTPException(422, f"Could not read workbook: {e}")
-    except Exception as e:  # noqa: BLE001 - keep upload failures user-readable
-        db.rollback()
-        raise HTTPException(422, f"Could not import workbook: {e}")
-    finally:
-        if os.path.exists(path):
-            os.unlink(path)
-
-
-@router.patch("/transactions/{transaction_id}", response_model=TransactionOut)
-def adjust_transaction(transaction_id: int, body: TransactionAdjust, db: Session = Depends(get_db)):
-    """Manual override of auto-filled challan/amount fields after a challan
-    upload (item 7 requirement: allow manual override after auto-fill)."""
-    txn = db.get(Transaction, transaction_id)
-    if not txn:
-        raise HTTPException(404, "Transaction not found")
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(txn, field, value)
-    db.commit()
-    db.refresh(txn)
-    return txn
-
-
 # ---------------------------------------------------------- Certificates ----
 @router.get("/certificates/pending")
-def pending_groupings(company_id: int | None = None, db: Session = Depends(get_db)):
+def pending_groupings(
+    company_id: int | None = None,
+    tin: str | None = None,
+    bin: str | None = None,
+    supplier_name: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: Session = Depends(get_db),
+):
     """(TIN, period) groupings with no certificate yet, scoped to a company
-    (or across all companies, for the Dashboard's global overview)."""
+    (or across all companies, for the Dashboard's global overview). Same
+    filters as GET /certificates so Pending and Generated search identically
+    instead of diverging (item 8)."""
     issued_q = db.query(Certificate).filter(Certificate.status != CertStatus.VOID)
     if company_id is not None:
         issued_q = issued_q.filter(Certificate.company_id == company_id)
     issued = {(c.tin, c.period) for c in issued_q}
-    return [g for g in list_groupings(db, company_id) if (g["tin"], g["period"]) not in issued]
+    groupings = list_groupings(db, company_id, tin=tin, bin=bin,
+                               supplier_name=supplier_name,
+                               date_from=date_from, date_to=date_to)
+    return [g for g in groupings if (g["tin"], g["period"]) not in issued]
 
 
 @router.get("/certificates")
@@ -276,7 +241,7 @@ def search_certificates(
 @router.post("/certificates/generate", response_model=CertificateDetailOut)
 def generate(req: GenerateRequest, db: Session = Depends(get_db)):
     try:
-        return generate_certificate(db, req.company_id, req.tin, req.period, req.signature_id)
+        return generate_certificate(db, req.company_id, req.tin, req.period)
     except GenerationError as e:
         raise HTTPException(409, str(e))
 
@@ -286,7 +251,7 @@ def generate_bulk(req: BulkGenerateRequest, db: Session = Depends(get_db)):
     results = []
     for item in req.items:
         try:
-            cert = generate_certificate(db, item.company_id, item.tin, item.period, item.signature_id)
+            cert = generate_certificate(db, item.company_id, item.tin, item.period)
             results.append({"tin": item.tin, "period": item.period,
                             "ok": True, "certificate_no": cert.certificate_no})
         except GenerationError as e:
@@ -294,6 +259,48 @@ def generate_bulk(req: BulkGenerateRequest, db: Session = Depends(get_db)):
             results.append({"tin": item.tin, "period": item.period,
                             "ok": False, "error": str(e)})
     return results
+
+
+@router.get("/certificates/export")
+def export_certificates(
+    company_id: int,
+    tin: str | None = None,
+    bin: str | None = None,
+    supplier_name: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    status: str | None = None,
+    certificate_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Item 11: Excel export (Depot-SCB schema, no VDS, anomaly-highlighted)
+    for the filtered set, or a single certificate via certificate_id.
+
+    Registered before /certificates/{cert_id} — path-param routes are
+    greedy in FastAPI's registration-order matching, so this literal path
+    must come first or "export" gets swallowed as a cert_id and 422s.
+    """
+    if certificate_id is not None:
+        cert = db.get(Certificate, certificate_id)
+        certs = [cert] if cert else []
+    else:
+        filters = BulkFilterRequest(company_id=company_id, tin=tin, bin=bin,
+                                    supplier_name=supplier_name, date_from=date_from,
+                                    date_to=date_to, status=status)
+        certs = _certificates_matching(db, filters).all()
+    if not certs:
+        raise HTTPException(404, "No certificates match")
+    wb = export_certificates_to_excel(db, certs)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = (f"certificate-{certs[0].certificate_no or certs[0].id}.xlsx"
+                if certificate_id is not None else "certificates-export.xlsx")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/certificates/{cert_id}", response_model=CertificateDetailOut)
@@ -417,43 +424,6 @@ def bulk_dispatch(body: BulkDispatchRequest, db: Session = Depends(get_db)):
     return results
 
 
-@router.get("/certificates/export")
-def export_certificates(
-    company_id: int,
-    tin: str | None = None,
-    bin: str | None = None,
-    supplier_name: str | None = None,
-    date_from: date | None = None,
-    date_to: date | None = None,
-    status: str | None = None,
-    certificate_id: int | None = None,
-    db: Session = Depends(get_db),
-):
-    """Item 11: Excel export (Depot-SCB schema, no VDS, anomaly-highlighted)
-    for the filtered set, or a single certificate via certificate_id."""
-    if certificate_id is not None:
-        cert = db.get(Certificate, certificate_id)
-        certs = [cert] if cert else []
-    else:
-        filters = BulkFilterRequest(company_id=company_id, tin=tin, bin=bin,
-                                    supplier_name=supplier_name, date_from=date_from,
-                                    date_to=date_to, status=status)
-        certs = _certificates_matching(db, filters).all()
-    if not certs:
-        raise HTTPException(404, "No certificates match")
-    wb = export_certificates_to_excel(db, certs)
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    filename = (f"certificate-{certs[0].certificate_no or certs[0].id}.xlsx"
-                if certificate_id is not None else "certificates-export.xlsx")
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
 @router.get("/certificates/{cert_id}/pdf")
 def download_pdf(cert_id: int, db: Session = Depends(get_db)):
     """Serves the PDF for Download and Print actions."""
@@ -462,6 +432,17 @@ def download_pdf(cert_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "PDF not found")
     return FileResponse(cert.pdf_path, media_type="application/pdf",
                         filename=os.path.basename(cert.pdf_path))
+
+
+@router.get("/certificates/{cert_id}/image")
+def download_certificate_image(cert_id: int, db: Session = Depends(get_db)):
+    """Serves the share-ready JPEG (WhatsApp/email) rasterized from the
+    same PDF — pixel-identical to it, not a separate render."""
+    cert = db.get(Certificate, cert_id)
+    if not cert or not cert.image_path or not os.path.exists(cert.image_path):
+        raise HTTPException(404, "Certificate image not found")
+    return FileResponse(cert.image_path, media_type="image/jpeg",
+                        filename=os.path.basename(cert.image_path))
 
 
 @router.post("/certificates/{cert_id}/dispatch")
@@ -746,19 +727,6 @@ def update_company(company_id: int, body: CompanyUpdate, db: Session = Depends(g
     return company
 
 
-@router.post("/companies/{company_id}/logo")
-def upload_company_logo(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    return _store_company_image(db, company_id, file, "logo_path", f"company{company_id}_logo")
-
-
-@router.get("/companies/{company_id}/logo")
-def get_company_logo(company_id: int, db: Session = Depends(get_db)):
-    company = get_company(db, company_id)
-    if not company.logo_path or not os.path.exists(company.logo_path):
-        raise HTTPException(404, "No logo uploaded")
-    return FileResponse(company.logo_path)
-
-
 @router.post("/companies/{company_id}/seal")
 def upload_company_seal(company_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
     _require_image(file)
@@ -831,8 +799,11 @@ def list_signatures(company_id: int, db: Session = Depends(get_db)):
 
 @router.post("/companies/{company_id}/signatures", response_model=SignatureOut)
 def create_signature(company_id: int, name: str = Form(...),
+                     designation: str | None = Form(None),
+                     email: str | None = Form(None),
                      file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Item 8: Admin can upload and name more than one signature per company."""
+    """Multiple named signatures per company; every one flagged `enabled`
+    renders on every certificate generated for that company."""
     get_company(db, company_id)  # 404s if the company doesn't exist
     _require_image(file)
     settings = get_settings()
@@ -844,8 +815,8 @@ def create_signature(company_id: int, name: str = Form(...),
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    is_first = db.query(Signature).filter(Signature.company_id == company_id).count() == 0
-    sig = Signature(company_id=company_id, name=name, image_path=path, is_default=is_first)
+    sig = Signature(company_id=company_id, name=name, designation=designation,
+                    email=email, image_path=path, enabled=True)
     db.add(sig)
     db.commit()
     db.refresh(sig)
@@ -866,14 +837,21 @@ def update_signature(company_id: int, signature_id: int, body: SignatureUpdate,
     sig = db.get(Signature, signature_id)
     if not sig or sig.company_id != company_id:
         raise HTTPException(404, "Signature not found")
-    if body.is_default:
-        db.query(Signature).filter(Signature.company_id == company_id).update(
-            {Signature.is_default: False})
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(sig, field, value)
     db.commit()
     db.refresh(sig)
     return sig
+
+
+@router.delete("/companies/{company_id}/signatures/{signature_id}")
+def delete_signature(company_id: int, signature_id: int, db: Session = Depends(get_db)):
+    sig = db.get(Signature, signature_id)
+    if not sig or sig.company_id != company_id:
+        raise HTTPException(404, "Signature not found")
+    db.delete(sig)
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/companies/{company_id}/numbering")

@@ -49,7 +49,6 @@ class Company(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True)
     address: Mapped[str | None] = mapped_column(Text)
-    logo_path: Mapped[str | None] = mapped_column(String(512))
     seal_path: Mapped[str | None] = mapped_column(String(512))  # PNG w/ alpha
     letterhead_header_path: Mapped[str | None] = mapped_column(String(512))
     letterhead_footer_path: Mapped[str | None] = mapped_column(String(512))
@@ -70,17 +69,20 @@ class Company(Base):
 
 
 class Signature(Base):
-    """A named signature image (e.g. one per signatory/designation), scoped
-    to a company. The user picks one at certificate-generation time."""
+    """A named signatory's signature, scoped to a company. Every signature
+    flagged ``enabled`` renders on every certificate generated for that
+    company, side by side in the signature row (no per-certificate choice)."""
 
     __tablename__ = "tds_signatures"
     __table_args__ = (UniqueConstraint("company_id", "name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     company_id: Mapped[int] = mapped_column(ForeignKey("tds_companies.id"), index=True)
-    name: Mapped[str] = mapped_column(String(255))
+    name: Mapped[str] = mapped_column(String(255))  # signatory's name
+    designation: Mapped[str | None] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(255))
     image_path: Mapped[str] = mapped_column(String(512))
-    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     company: Mapped[Company] = relationship(back_populates="signatures")
@@ -223,10 +225,6 @@ class Certificate(Base):
     company_id: Mapped[int] = mapped_column(ForeignKey("tds_companies.id"), index=True)
     certificate_no: Mapped[str | None] = mapped_column(String(64), unique=True)
     supplier_id: Mapped[int] = mapped_column(ForeignKey("tds_suppliers.id"))
-    # Signature applied to this certificate, chosen at generation time.
-    # Nullable: falls back to the company's default signature, then to the
-    # legacy OrgSettings.signature_path (see pdf_renderer.py).
-    signature_id: Mapped[int | None] = mapped_column(ForeignKey("tds_signatures.id"))
     tin: Mapped[str] = mapped_column(String(20), index=True)
     period: Mapped[str] = mapped_column(String(9), index=True)  # fiscal year
     period_from: Mapped[date | None] = mapped_column(Date)
@@ -245,10 +243,13 @@ class Certificate(Base):
     # "manual" keeps whatever issue_date was explicitly set in the preview.
     issue_date_mode: Mapped[str] = mapped_column(String(10), default="auto")
     pdf_path: Mapped[str | None] = mapped_column(String(512))
+    # High-resolution JPEG rasterized directly from pdf_path (same source,
+    # so it's pixel-identical to the PDF) — the share-ready artifact for
+    # WhatsApp/email, sized to avoid WhatsApp's own re-compression.
+    image_path: Mapped[str | None] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     company: Mapped[Company] = relationship()
-    signature: Mapped[Signature | None] = relationship()
     supplier: Mapped[Supplier] = relationship()
     lines: Mapped[list["CertificateLine"]] = relationship(
         back_populates="certificate", cascade="all, delete-orphan",

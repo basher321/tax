@@ -131,7 +131,6 @@ class ChallanLineOut(ORM):
 class CertificateOut(ORM):
     id: int
     company_id: int
-    signature_id: int | None
     certificate_no: str | None
     tin: str
     period: str
@@ -169,7 +168,6 @@ class GenerateRequest(BaseModel):
     company_id: int
     tin: str
     period: str
-    signature_id: int | None = None  # defaults to the company's default signature
 
 
 class BulkGenerateRequest(BaseModel):
@@ -206,7 +204,6 @@ class CompanyOut(ORM):
     id: int
     name: str
     address: str | None
-    logo_path: str | None
     seal_path: str | None
     letterhead_header_path: str | None
     letterhead_footer_path: str | None
@@ -252,13 +249,17 @@ class SignatureOut(ORM):
     id: int
     company_id: int
     name: str
+    designation: str | None
+    email: str | None
     image_path: str
-    is_default: bool
+    enabled: bool
 
 
 class SignatureUpdate(BaseModel):
     name: str | None = None
-    is_default: bool | None = None
+    designation: str | None = None
+    email: str | None = None
+    enabled: bool | None = None
 
 
 class BulkFilterRequest(BaseModel):
@@ -325,32 +326,6 @@ class NumberingIn(BaseModel):
     reset_policy: str | None = None
     separator: str | None = None
     number_format: str | None = None
-
-
-class TransactionOut(ORM):
-    id: int
-    tin: str | None
-    supplier_name: str | None
-    month: str | None
-    section: str | None
-    challan_no: str | None
-    challan_date: date | None
-    total_challan_amount: float | None
-    sum_of_bill_amount: float | None
-    sum_of_tds: float | None
-
-
-class TransactionAdjust(BaseModel):
-    """Manual override of auto-filled challan/amount fields after a challan
-    upload. All fields optional — only supplied ones are updated. VDS is
-    intentionally excluded from this pipeline."""
-
-    challan_no: str | None = None
-    challan_date: date | None = None
-    total_challan_amount: float | None = None
-    section: str | None = None
-    sum_of_bill_amount: float | None = None
-    sum_of_tds: float | None = None
 
 
 class RateUpdateIn(BaseModel):
