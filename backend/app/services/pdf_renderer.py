@@ -490,14 +490,29 @@ def render_certificate_pdf(db, cert) -> None:
     else:
         block.append(_placeholder_box("Seal", 30, 16))
 
-    # The block sits flush against the right margin (the same distance from
-    # the page's right edge as the body content's left edge is from the
+    # Left-hand column of the same footer row: the signatory's Name /
+    # Designation / Email, stacked — sourced from the same Signature record
+    # (Settings > Signatures) the right-hand block's image already comes
+    # from. Any field left blank in Settings is simply omitted here rather
+    # than printed as an empty label.
+    info = []
+    if signature:
+        info.append(Paragraph(f"<b>Name :</b> {signature.name}", P_CELL))
+        if signature.designation:
+            info.append(Paragraph(f"<b>Designation :</b> {signature.designation}", P_CELL))
+        if signature.email:
+            info.append(Paragraph(f"<b>Email :</b> {signature.email}", P_CELL))
+
+    # The right block sits flush against the right margin (the same distance
+    # from the page's right edge as the body content's left edge is from the
     # left, since the footer frame already respects both side margins) —
     # a narrow right-hand column holds it, elements centered on each other
-    # within that column so the stack reads as one clean unit.
+    # within that column so the stack reads as one clean unit. The signatory
+    # info sits in the remaining space at the left margin, on the same row.
     BLOCK_W = 55 * mm
-    footer = Table([["", block]], colWidths=[W - BLOCK_W, BLOCK_W])
+    footer = Table([[info or "", block]], colWidths=[W - BLOCK_W, BLOCK_W])
     footer.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (0, 0), "LEFT"),
         ("ALIGN", (1, 0), (1, 0), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
         ("LINEABOVE", (0, 0), (-1, 0), 0.75, colors.black),
