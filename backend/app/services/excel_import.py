@@ -1,14 +1,15 @@
 """Excel import service for the Depot-SCB sheet.
 
-Parses the workbook directly with openpyxl/pandas — no Excel formula
-evaluation happens at runtime. Row-level validation errors are recorded
-(never aborting the whole import for one bad row).
+Parses the workbook directly with openpyxl — no Excel formula evaluation
+happens at runtime. Row-level validation errors are recorded (never
+aborting the whole import for one bad row).
 """
 import json
+import math
 import re
 from datetime import date, datetime
 
-import pandas as pd
+import openpyxl
 from sqlalchemy.orm import Session
 
 from ..models.entities import (
@@ -82,7 +83,7 @@ def fiscal_year_for(d: date) -> str:
 
 
 def _parse_date(value) -> date | None:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
     if isinstance(value, datetime):
         return value.date()
@@ -102,7 +103,7 @@ def _parse_number(value) -> float | None:
         return None
     try:
         f = float(value)
-        return None if pd.isna(f) else f
+        return None if math.isnan(f) else f
     except (TypeError, ValueError):
         return None
 
@@ -110,42 +111,58 @@ def _parse_number(value) -> float | None:
 def _clean(value):
     if value is None:
         return None
-    if isinstance(value, float) and pd.isna(value):
+    if isinstance(value, float) and math.isnan(value):
         return None
     s = str(value).strip()
     return s or None
 
 
-def _find_header_row(path: str, sheet_name: str) -> int | None:
-    """Read the sheet locating the header row that contains 'Category'."""
-    raw = pd.read_excel(path, sheet_name=sheet_name, header=None, dtype=object)
-    for i in range(min(10, len(raw))):
-        if "Category" in [str(v).strip() for v in raw.iloc[i].tolist()]:
+def _find_header_row(ws) -> int | None:
+    """Locate the 0-based row index (within the first 10 rows) containing 'Category'."""
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True)):
+        if "Category" in [str(v).strip() if v is not None else "" for v in row]:
             return i
     return None
 
 
-def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> pd.DataFrame:
-    """Read the Depot sheet, locating the header row that contains 'Category'."""
-    with pd.ExcelFile(path) as xl:
-        sheet_names = xl.sheet_names
-    candidates = [sheet_name] if sheet_name in sheet_names else []
-    candidates.extend([name for name in sheet_names if name not in candidates])
+def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str], list[dict]]:
+    """Read the Depot sheet, locating the header row that contains 'Category'.
+    Returns (columns, rows); each row is a dict of column name -> cell value,
+    plus a 1-based '__excel_row' Excel row number."""
+    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    try:
+        sheet_names = wb.sheetnames
+        candidates = [sheet_name] if sheet_name in sheet_names else []
+        candidates.extend([name for name in sheet_names if name not in candidates])
 
-    selected_sheet = None
-    header_idx = None
-    for candidate in candidates:
-        header_idx = _find_header_row(path, candidate)
-        if header_idx is not None:
-            selected_sheet = candidate
-            break
+        selected_sheet = None
+        header_idx = None
+        for candidate in candidates:
+            header_idx = _find_header_row(wb[candidate])
+            if header_idx is not None:
+                selected_sheet = candidate
+                break
 
-    if header_idx is None:
-        raise ValueError("Could not find header row containing 'Category'")
-    df = pd.read_excel(path, sheet_name=selected_sheet, header=header_idx, dtype=object)
-    df.columns = [str(c).strip() for c in df.columns]
-    df["__excel_row"] = df.index + header_idx + 2  # 1-based Excel row numbers
-    return df
+        if header_idx is None:
+            raise ValueError("Could not find header row containing 'Category'")
+
+        ws = wb[selected_sheet]
+        header_row_num = header_idx + 1  # 1-based
+        header_values = next(
+            ws.iter_rows(min_row=header_row_num, max_row=header_row_num, values_only=True)
+        )
+        columns = [str(c).strip() if c is not None else "" for c in header_values]
+
+        rows = []
+        for excel_row_num, values in enumerate(
+            ws.iter_rows(min_row=header_row_num + 1, values_only=True), start=header_row_num + 1
+        ):
+            row = {columns[i]: (values[i] if i < len(values) else None) for i in range(len(columns))}
+            row["__excel_row"] = excel_row_num
+            rows.append(row)
+        return columns, rows
+    finally:
+        wb.close()
 
 
 def _get_or_create_supplier(db: Session, company_id: int, tin: str, name: str,
@@ -177,13 +194,13 @@ def _get_or_create_supplier(db: Session, company_id: int, tin: str, name: str,
 def import_depot_workbook(db: Session, path: str, filename: str, company_id: int) -> ImportBatch:
     """Import the Depot-SCB sheet: validate row by row, persist good rows,
     record errors for bad ones. Never aborts on a single bad row."""
-    df = load_depot_sheet(path)
-    batch = ImportBatch(company_id=company_id, filename=filename, kind="depot", total_rows=len(df))
+    columns, rows = load_depot_sheet(path)
+    batch = ImportBatch(company_id=company_id, filename=filename, kind="depot", total_rows=len(rows))
     db.add(batch)
     db.flush()
 
     ok = err = 0
-    for _, row in df.iterrows():
+    for row in rows:
         excel_row = int(row["__excel_row"])
         row_errors: list[tuple[str | None, str]] = []
 
@@ -213,7 +230,7 @@ def import_depot_workbook(db: Session, path: str, filename: str, company_id: int
         for col in ("Sum of Bill Amount", "Sum of TDS", "Total Challan Amount",
                     "Base Amount", "TDS Rate"):
             v = val(col)
-            if v is not None and not (isinstance(v, float) and pd.isna(v)):
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
                 n = _parse_number(v)
                 if n is None:
                     row_errors.append((col, f"'{v}' is not a number"))
@@ -280,7 +297,7 @@ def import_depot_workbook(db: Session, path: str, filename: str, company_id: int
             match=_clean(val("Match")),
             section=_clean(val("Section")),
             tin=tin,
-            challan_no=_clean(val("Challan No") if "Challan No" in df.columns
+            challan_no=_clean(val("Challan No") if "Challan No" in columns
                               else val("Challan No.")),
             challan_date=challan_date,
             cheque_challan_sl=_clean(val("Cheque/Challan SL")),

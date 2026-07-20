@@ -1,29 +1,33 @@
 [project]
 name = "tax-certificate-backend"
-version = "0.1.5"
+version = "0.1.6"
 requires-python = ">=3.10"
 # Mirrors requirements.txt (still used by the Render/Railway deploy paths),
 # minus what doesn't belong in the deployed bundle: uvicorn (only ever used
 # to launch a local/Docker server process — Vercel's Python runtime serves
 # the ASGI `app` object itself, it never runs uvicorn), pytest (test-only),
 # and alembic (migration tooling, run separately against DATABASE_URL —
-# never imported by the app itself at request-serving time). Also swapped
+# never imported by the app itself at request-serving time). Also swapped:
 # psycopg2-binary for pg8000 (pure-Python, no bundled libpq/OpenSSL — see
-# database.py for the matching ssl_context connect_args) and pymupdf for
+# database.py for the matching ssl_context connect_args); pymupdf for
 # pypdfium2 (both only rasterize the generated PDF into a share-ready JPEG;
 # pypdfium2 wraps just the PDFium renderer, not a full MuPDF with bundled
-# fonts/codecs/JS engine, so it's a fraction of the size for the same job —
-# see export_certificate_image() in pdf_renderer.py). Trimmed because the
-# full set exceeded Vercel's 500MB Python function bundle limit (542MB,
-# then 513.68MB, then 512.37MB, then 502.70MB). Vercel's Python builder
-# resolves/locks dependencies from this [project] table via uv, not from
-# requirements.txt.
+# fonts/codecs/JS engine — see export_certificate_image() in
+# pdf_renderer.py); and pandas dropped entirely — it was only ever used to
+# read the Depot-SCB sheet (pandas.read_excel already delegates to openpyxl
+# for .xlsx under the hood), so excel_import.py now reads the workbook with
+# openpyxl directly and pulls in numpy along with it. Trimmed because the
+# full dependency set kept exceeding Vercel's Python function size limits:
+# 542MB, then 513.68MB, then 512.37MB, then 502.70MB against the raw 500MB
+# ceiling; then a second, stricter 359.22MB vs. 225MB "after optimizing
+# dependencies" ceiling once the first one was cleared. Vercel's Python
+# builder resolves/locks dependencies from this [project] table via uv, not
+# from requirements.txt.
 dependencies = [
     "fastapi>=0.110",
     "sqlalchemy>=2.0",
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
-    "pandas>=2.2",
     "openpyxl>=3.1",
     "reportlab>=4.1",
     "pypdfium2>=4.30",

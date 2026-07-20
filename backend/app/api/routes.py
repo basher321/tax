@@ -6,7 +6,6 @@ import tempfile
 from zipfile import BadZipFile
 from datetime import date, datetime
 
-import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import and_, func, or_, true
@@ -141,16 +140,15 @@ def upload_depot(company_id: int = Form(...), file: UploadFile = File(...), db: 
     path = _save_upload(file)
     try:
         batch = import_depot_workbook(db, path, file.filename or "upload.xlsx", company_id)
-        df = load_depot_sheet(path)
-        columns = [c for c in df.columns if c != "__excel_row"]
+        columns, raw_rows = load_depot_sheet(path)
         rows = []
-        for _, r in df.iterrows():
+        for r in raw_rows:
             row = {"__excel_row": int(r["__excel_row"])}
             for c in columns:
                 v = r.get(c)
-                if v is None or (isinstance(v, float) and pd.isna(v)):
+                if v is None:
                     row[c] = ""
-                elif isinstance(v, (pd.Timestamp, datetime, date)):
+                elif isinstance(v, (datetime, date)):
                     row[c] = v.strftime("%d/%m/%Y")
                 else:
                     row[c] = str(v)
