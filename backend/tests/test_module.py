@@ -420,7 +420,7 @@ def test_certificate_image_includes_overflow_pages(db, company, tmp_path):
     content ends on (normal pagination) — the exported image must include
     that page too, not silently drop it by only rasterizing page one."""
     from PIL import Image
-    import fitz
+    import pypdfium2 as pdfium
 
     wb = Workbook()
     ws = wb.active
@@ -439,7 +439,7 @@ def test_certificate_image_includes_overflow_pages(db, company, tmp_path):
     import_depot_workbook(db, str(path), "bulk.xlsx", company.id)
     cert = generate_certificate(db, company.id, "999988887777", "2025-26")
 
-    with fitz.open(stream=cert.pdf_data, filetype="pdf") as pdf:
+    with pdfium.PdfDocument(cert.pdf_data) as pdf:
         page_count = len(pdf)
     assert page_count > 1, "test setup should force real overflow to prove the fix"
 

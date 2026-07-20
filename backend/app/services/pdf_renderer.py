@@ -117,17 +117,16 @@ def export_certificate_image(pdf_bytes: bytes) -> bytes:
     Every page is rasterized and stacked vertically here so the Seal and
     Signature block is never silently dropped just because it landed on
     page 2 rather than page 1."""
-    import fitz  # local import: only this one call needs it
+    import pypdfium2 as pdfium  # local import: only this one call needs it
     from PIL import Image
 
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pdfium.PdfDocument(pdf_bytes)
     try:
-        long_edge_pt = max(doc[0].rect.width, doc[0].rect.height)
-        zoom = _SHARE_IMAGE_LONG_EDGE_PX / long_edge_pt
-        matrix = fitz.Matrix(zoom, zoom)
+        page0 = doc[0]
+        long_edge_pt = max(page0.get_size())
+        scale = _SHARE_IMAGE_LONG_EDGE_PX / long_edge_pt
         page_images = [
-            Image.open(io.BytesIO(page.get_pixmap(matrix=matrix).tobytes("png"))).convert("RGB")
-            for page in doc
+            page.render(scale=scale).to_pil().convert("RGB") for page in doc
         ]
     finally:
         doc.close()
