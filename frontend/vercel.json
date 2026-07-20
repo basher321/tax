@@ -1,7 +1,7 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://tax-production-2592.up.railway.app/api/:path*" },
-    { "source": "/public/:path*", "destination": "https://tax-production-2592.up.railway.app/public/:path*" },
+    { "source": "/api/:path*", "destination": "https://tax-ihcq.vercel.app/api/:path*" },
+    { "source": "/public/:path*", "destination": "https://tax-ihcq.vercel.app/public/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
