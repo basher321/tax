@@ -58,7 +58,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (
-    BaseDocTemplate, Frame, FrameBreak, HRFlowable, KeepTogether, PageTemplate,
+    BaseDocTemplate, Frame, FrameBreak, HRFlowable, PageTemplate,
     Paragraph, Spacer, Table, TableStyle, Image as RLImage,
 )
 from reportlab.lib.utils import ImageReader
@@ -369,18 +369,18 @@ def render_certificate_pdf(db, cert) -> None:
         ("ALIGN", (4, 1), (5, -1), "RIGHT"),
         ("ALIGN", (1, -1), (1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("SPAN", (6, 1), (6, n_rows)),
-        ("VALIGN", (6, 1), (6, n_rows), "TOP"),
+        ("VALIGN", (6, 1), (6, 1), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.93, 0.93, 0.93)),
         ("TOPPADDING", (0, 0), (-1, -1), 1.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
     ]))
-    # KeepTogether: the Remarks column is SPANned down the whole table, and
-    # ReportLab's row-splitter can't cleanly split a table mid-span (it
-    # crashes trying to compute row heights across the break). Keeping the
-    # table atomic pushes it whole onto the next page instead, which also
-    # means the table itself is never cut mid-row across a page boundary.
-    story.append(KeepTogether([s6]))
+    # No SPAN on the Remarks column (each row gets its own bordered cell,
+    # blank past row 1) and no KeepTogether: ReportLab cannot cleanly split
+    # a table whose Remarks column is SPANned down every row once that table
+    # no longer fits on a single page — it crashes instead of paginating.
+    # A long enough Section 06 (many lines, or long descriptions) needs to
+    # split across pages, so it must stay a plain, splittable table.
+    story.append(s6)
     story.append(Spacer(1, 5 * mm))
 
     # ---------- Section 07 ---------------------------------------------------
@@ -425,13 +425,12 @@ def render_certificate_pdf(db, cert) -> None:
         ("ALIGN", (4, 1), (5, -1), "RIGHT"),
         ("ALIGN", (1, -1), (1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("SPAN", (6, 1), (6, n7)),
-        ("VALIGN", (6, 1), (6, n7), "TOP"),
+        ("VALIGN", (6, 1), (6, 1), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.93, 0.93, 0.93)),
         ("TOPPADDING", (0, 0), (-1, -1), 1.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
     ]))
-    story.append(KeepTogether([s7]))  # same SPAN-vs-split issue as Section 06
+    story.append(s7)  # same SPAN-vs-split fix as Section 06, see comment above
     story.append(Spacer(1, 4 * mm))
 
     # ---------- Amount in words + certification ------------------------------
