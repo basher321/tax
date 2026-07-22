@@ -10,7 +10,7 @@ import re
 from datetime import date, datetime
 
 import openpyxl
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ..models.entities import (
     ContactKind,
@@ -182,17 +182,18 @@ def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str
         wb.close()
 
 
-def _get_or_create_supplier(db: Session, company_id: int, tin: str, name: str,
-                            address, email, wa) -> Supplier:
-    sup = (
-        db.query(Supplier)
-        .filter(Supplier.company_id == company_id, Supplier.tin == tin)
-        .first()
-    )
+def _get_or_create_supplier(db: Session, cache: dict[str, Supplier], company_id: int,
+                             tin: str, name: str, address, email, wa) -> Supplier:
+    """`cache` holds every supplier already seen for this company — prefetched
+    once by the caller, plus every supplier created earlier in this same
+    import — so a multi-thousand-row workbook doesn't cost a supplier lookup
+    query per row (most rows share a relative handful of distinct suppliers)."""
+    sup = cache.get(tin)
     if not sup:
         sup = Supplier(company_id=company_id, tin=tin, name=name, address=address)
         db.add(sup)
-        db.flush()
+        db.flush()  # need the new supplier's id before Transaction.supplier_id can reference it
+        cache[tin] = sup
     else:
         # Keep the most recent non-empty name/address.
         if name:
@@ -204,7 +205,6 @@ def _get_or_create_supplier(db: Session, company_id: int, tin: str, name: str,
             exists = any(c.kind == kind and c.value == value for c in sup.contacts)
             if not exists:
                 sup.contacts.append(SupplierContact(kind=kind, value=value))
-                db.flush()
     return sup
 
 
@@ -215,6 +215,14 @@ def import_depot_workbook(db: Session, path: str, filename: str, company_id: int
     batch = ImportBatch(company_id=company_id, filename=filename, kind="depot", total_rows=len(rows))
     db.add(batch)
     db.flush()
+
+    # One query for every supplier this company already has, instead of one
+    # per row — the dominant cost on large imports otherwise.
+    supplier_cache = {
+        s.tin: s for s in
+        db.query(Supplier).options(joinedload(Supplier.contacts))
+          .filter(Supplier.company_id == company_id)
+    }
 
     ok = err = 0
     for row in rows:
@@ -289,7 +297,7 @@ def import_depot_workbook(db: Session, path: str, filename: str, company_id: int
             continue
 
         supplier = _get_or_create_supplier(
-            db, company_id, tin, _clean(val("Supplier Name")),
+            db, supplier_cache, company_id, tin, _clean(val("Supplier Name")),
             _clean(val("Supplier Address")), _clean(val("Email")),
             _clean(val("WhatsApp No.")),
         )

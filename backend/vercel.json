@@ -2,7 +2,7 @@
   "regions": ["hnd1"],
   "functions": {
     "app/main.py": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   }
 }
