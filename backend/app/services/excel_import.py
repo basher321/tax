@@ -118,15 +118,23 @@ def _clean(value):
 
 
 def _find_header_row(ws) -> int | None:
-    """Locate the 0-based row index (within the first 10 rows) containing 'Category'."""
+    """Locate the 0-based row index (within the first 10 rows) that looks like
+    the real header — i.e. contains every REQUIRED_FIELDS column name. Sheets
+    aren't guaranteed to include every SOURCE_COLUMNS field ('Category' in
+    particular is informational, not required, and some workbooks omit it),
+    so anchoring on the fields the import can't work without is what actually
+    generalizes across differently-trimmed templates."""
+    required = set(REQUIRED_FIELDS)
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True)):
-        if "Category" in [str(v).strip() if v is not None else "" for v in row]:
+        vals = {str(v).strip() if v is not None else "" for v in row}
+        if required <= vals:
             return i
     return None
 
 
 def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str], list[dict]]:
-    """Read the Depot sheet, locating the header row that contains 'Category'.
+    """Read the Depot sheet, locating the header row that contains every
+    REQUIRED_FIELDS column name.
     Returns (columns, rows); each row is a dict of column name -> cell value,
     plus a 1-based '__excel_row' Excel row number."""
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
@@ -144,7 +152,10 @@ def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str
                 break
 
         if header_idx is None:
-            raise ValueError("Could not find header row containing 'Category'")
+            raise ValueError(
+                "Could not find a header row containing all required columns: "
+                + ", ".join(REQUIRED_FIELDS)
+            )
 
         ws = wb[selected_sheet]
         header_row_num = header_idx + 1  # 1-based
@@ -157,6 +168,12 @@ def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str
         for excel_row_num, values in enumerate(
             ws.iter_rows(min_row=header_row_num + 1, values_only=True), start=header_row_num + 1
         ):
+            # Skip fully blank rows — common trailing padding from a
+            # formatted-but-empty range (e.g. borders/column formatting
+            # applied far past the real data). They aren't data-entry
+            # mistakes, so they shouldn't count as import errors.
+            if all(v is None for v in values):
+                continue
             row = {columns[i]: (values[i] if i < len(values) else None) for i in range(len(columns))}
             row["__excel_row"] = excel_row_num
             rows.append(row)
