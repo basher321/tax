@@ -66,14 +66,19 @@ function DepotPanel({ companyId }) {
         title=""
         subtitle="Upload the Depot-SCB workbook. Every parsed row and column appears below."
       >
-        <label className={`btn-primary cursor-pointer ${busy || !companyId ? "opacity-60 pointer-events-none" : ""}`}>
-          {busy ? "Parsing..." : batch || error ? "Replace file" : "Upload .xlsx file"}
-          <input
-            ref={fileInputRef}
-            type="file" accept=".xlsx" className="hidden"
-            onChange={handleFile} disabled={busy || !companyId}
-          />
-        </label>
+        <div className="flex items-center gap-2">
+          <a className="btn-ghost" href="/Sample_TDS_Format.xlsx" download>
+            Download sample file
+          </a>
+          <label className={`btn-primary cursor-pointer ${busy || !companyId ? "opacity-60 pointer-events-none" : ""}`}>
+            {busy ? "Parsing..." : batch || error ? "Replace file" : "Upload .xlsx file"}
+            <input
+              ref={fileInputRef}
+              type="file" accept=".xlsx" className="hidden"
+              onChange={handleFile} disabled={busy || !companyId}
+            />
+          </label>
+        </div>
       </PageHeader>
 
       {error && (

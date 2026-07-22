@@ -485,11 +485,15 @@ export default function CertificateIssue() {
 
   const search = (nextPage = page) => {
     if (!companyId) return Promise.resolve();
-    return api.searchCertificates({ ...filters, company_id: companyId, page: nextPage, page_size: 20 }).then(setResults);
+    // TIN is matched server-side with a substring LIKE against the raw
+    // digits stored on the certificate — a copy-pasted TIN carrying a stray
+    // leading/trailing space (common when pasted from Excel or a PDF) would
+    // never match, so trim it here before it goes out.
+    return api.searchCertificates({ ...filters, tin: filters.tin.trim(), company_id: companyId, page: nextPage, page_size: 20 }).then(setResults);
   };
   const loadPending = () => {
     if (!companyId) return Promise.resolve();
-    return api.pendingGroupings(companyId, filters).then(setPending);
+    return api.pendingGroupings(companyId, { ...filters, tin: filters.tin.trim() }).then(setPending);
   };
 
   useEffect(() => { search(); }, [page, companyId]);
