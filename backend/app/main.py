@@ -61,6 +61,38 @@ def health():
     return {"ok": True}
 
 
+@app.post("/api/admin/migrate-e2f3a4b5c6d7")
+def _run_migration_e2f3a4b5c6d7(secret: str):
+    """TEMPORARY, one-off: applies migration e2f3a4b5c6d7 (drop Designated
+    Officer name/designation/email columns) directly via SQL, since alembic
+    itself is intentionally not a runtime dependency here (see
+    pyproject.toml — kept out to stay under Vercel's function size limit).
+    Mirrors that migration's upgrade() body exactly, idempotently
+    (IF EXISTS), and records it in alembic_version. Remove this endpoint
+    once the migration has been applied."""
+    from sqlalchemy import text
+
+    expected = os.environ.get("MIGRATION_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(403, "Forbidden")
+
+    statements = [
+        "ALTER TABLE tds_companies DROP COLUMN IF EXISTS officer_name",
+        "ALTER TABLE tds_companies DROP COLUMN IF EXISTS officer_designation",
+        "ALTER TABLE tds_companies DROP COLUMN IF EXISTS officer_email",
+        "ALTER TABLE tds_org_settings DROP COLUMN IF EXISTS officer_name",
+        "ALTER TABLE tds_org_settings DROP COLUMN IF EXISTS officer_designation",
+        "ALTER TABLE tds_org_settings DROP COLUMN IF EXISTS officer_email",
+        "UPDATE alembic_version SET version_num = 'e2f3a4b5c6d7' WHERE version_num = 'd1e2f3a4b5c6'",
+    ]
+    applied = []
+    with engine.begin() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
+            applied.append(stmt)
+    return {"ok": True, "applied": applied}
+
+
 def _frontend_dist() -> Path | None:
     candidates = [
         os.environ.get("FRONTEND_DIST"),
