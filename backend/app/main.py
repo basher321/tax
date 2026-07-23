@@ -61,38 +61,6 @@ def health():
     return {"ok": True}
 
 
-@app.post("/api/admin/migrate-d1e2f3a4b5c6")
-def _run_migration_d1e2f3a4b5c6(secret: str):
-    """TEMPORARY, one-off: applies migration d1e2f3a4b5c6 (Payment Date,
-    Base Amount/TDS Rate, and certificate-line transaction links) directly
-    via SQL, since alembic itself is intentionally not a runtime dependency
-    here (see pyproject.toml — kept out to stay under Vercel's function size
-    limit). Mirrors that migration's upgrade() body exactly, idempotently
-    (IF NOT EXISTS), and records it in alembic_version so a future `alembic
-    upgrade head` run from a normal checkout doesn't try to re-apply it.
-    Remove this endpoint once the migration has been applied."""
-    from sqlalchemy import text
-
-    expected = os.environ.get("MIGRATION_SECRET")
-    if not expected or secret != expected:
-        raise HTTPException(403, "Forbidden")
-
-    statements = [
-        "ALTER TABLE tds_transactions ADD COLUMN IF NOT EXISTS base_amount DOUBLE PRECISION",
-        "ALTER TABLE tds_transactions ADD COLUMN IF NOT EXISTS tds_rate DOUBLE PRECISION",
-        "ALTER TABLE tds_certificates ADD COLUMN IF NOT EXISTS payment_date DATE",
-        "ALTER TABLE tds_certificate_lines ADD COLUMN IF NOT EXISTS transaction_id INTEGER REFERENCES tds_transactions(id)",
-        "ALTER TABLE tds_certificate_challan_lines ADD COLUMN IF NOT EXISTS transaction_id INTEGER REFERENCES tds_transactions(id)",
-        "UPDATE alembic_version SET version_num = 'd1e2f3a4b5c6' WHERE version_num = 'c5d6e7f8a9b0'",
-    ]
-    applied = []
-    with engine.begin() as conn:
-        for stmt in statements:
-            conn.execute(text(stmt))
-            applied.append(stmt)
-    return {"ok": True, "applied": applied}
-
-
 def _frontend_dist() -> Path | None:
     candidates = [
         os.environ.get("FRONTEND_DIST"),
