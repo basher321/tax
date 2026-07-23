@@ -73,8 +73,8 @@ def _run_migration_d1e2f3a4b5c6(secret: str):
     Remove this endpoint once the migration has been applied."""
     from sqlalchemy import text
 
-    settings = get_settings()
-    if secret != settings.link_signing_secret:
+    expected = os.environ.get("MIGRATION_SECRET")
+    if not expected or secret != expected:
         raise HTTPException(403, "Forbidden")
 
     statements = [
