@@ -18,11 +18,11 @@ The layout is LOCKED — it reproduces certificate_format.jpeg exactly:
     Total amount in the challan | Amount relating to this certificate |
     Remarks + Total row (total of "amount relating" only)
   * Amount In word + certification line
-  * Footer block, pinned to a fixed position at the bottom of the page (a
-    dedicated ReportLab Frame, not just appended after the content — so it
-    never "floats" up on short certificates or collides with content on
-    long ones): one "Seal and Signature" unit, flush against the right
-    margin (mirroring the left margin's distance from the page edge),
+  * Footer block, flowing directly after the certification line (a short
+    Spacer between them, not a separate bottom-pinned Frame — so it sits
+    close under that sentence instead of floating down at a fixed distance
+    from the page bottom): one "Seal and Signature" unit, flush against the
+    right margin (mirroring the left margin's distance from the page edge),
     stacked top to bottom — signature image, the "Seal and Signature"
     label, the issue date (DD Month YYYY), then the seal image directly
     below the date, all centered on each other within the block's own
@@ -57,17 +57,12 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (
-    BaseDocTemplate, Frame, FrameBreak, HRFlowable, PageTemplate,
+    BaseDocTemplate, Frame, HRFlowable, PageTemplate,
     Paragraph, Spacer, Table, TableStyle, Image as RLImage,
 )
 from reportlab.lib.utils import ImageReader
 
 from ..models.entities import Signature
-
-# Fixed height reserved for the bottom-pinned footer frame — just the Seal
-# and Signature block now, sized to reclaim page height for Section 06/07
-# rows (fewer line items overflow onto a second page before it's needed).
-_FOOTER_H = 52 * mm
 
 
 def _fitted_image(data: bytes | None, max_w_mm: float, max_h_mm: float) -> "RLImage | None":
@@ -245,15 +240,11 @@ def render_certificate_pdf(db, cert) -> None:
         title=f"Certificate of Deduction of Tax {cert.certificate_no}",
     )
     content_frame = Frame(
-        doc.leftMargin, doc.bottomMargin + _FOOTER_H + footer_reserve,
-        doc.width, doc.height - _FOOTER_H - header_reserve - footer_reserve,
+        doc.leftMargin, doc.bottomMargin + footer_reserve,
+        doc.width, doc.height - header_reserve - footer_reserve,
         id="content",
     )
-    footer_frame = Frame(
-        doc.leftMargin, doc.bottomMargin + footer_reserve, doc.width, _FOOTER_H,
-        id="footer",
-    )
-    doc.addPageTemplates([PageTemplate(id="page", frames=[content_frame, footer_frame],
+    doc.addPageTemplates([PageTemplate(id="page", frames=[content_frame],
                                        onPage=_draw_letterhead)])
 
     W = doc.width
@@ -437,12 +428,12 @@ def render_certificate_pdf(db, cert) -> None:
     ]))
     story.append(aiw)
 
-    # ---------- Footer, pinned to a fixed frame at the bottom of the page ----
+    # ---------- Footer, flowing directly after the certification line -------
     # One combined "Seal and Signature" unit, centered as a single block:
     # signature image, then the label, then the issue date (DD Month YYYY),
     # then the seal image directly below the date. If either image isn't
     # configured yet, a labeled placeholder box stands in for it.
-    story.append(FrameBreak())
+    story.append(Spacer(1, 6 * mm))
 
     signature = (
         db.query(Signature)

@@ -2,6 +2,9 @@ import { forwardRef, useCallback, useMemo, useRef } from "react";
 import { FixedSizeList } from "react-window";
 
 const ROW_HEIGHT = 30;
+// Container fits content up to this many rows; beyond it, height is capped
+// to roughly this many rows tall and the rest scrolls vertically.
+const MAX_VISIBLE_ROWS = 20;
 
 /* Row-virtualized table (react-window) for datasets too large to render as a
  * plain <table> — only the visible rows are ever in the DOM, so 50,000+ rows
@@ -10,18 +13,25 @@ const ROW_HEIGHT = 30;
  * sum of the column widths (wider than the viewport) via innerElementType.
  * The header lives in its own div above the list and is kept in horizontal
  * sync by translating it with the list's own scrollLeft on every scroll. */
-export default function VirtualizedTable({ columns, rows, height = 480 }) {
+export default function VirtualizedTable({ columns, rows }) {
   const totalWidth = useMemo(
     () => columns.reduce((sum, c) => sum + c.width, 0),
     [columns],
   );
+  // Content-driven height for <=20 rows (no leftover empty space below the
+  // last row); capped to ~20 rows tall with a vertical scrollbar beyond that.
+  const listHeight = Math.min(rows.length, MAX_VISIBLE_ROWS) * ROW_HEIGHT;
   const headerRef = useRef(null);
 
   const Outer = useMemo(() => forwardRef(function Outer(props, ref) {
-    const { onScroll, ...rest } = props;
+    const { onScroll, style, ...rest } = props;
     return (
       <div
         ref={ref}
+        // Force the horizontal scrollbar to always render (rather than only
+        // on hover/overlay) so it's visible and discoverable whenever
+        // columns overflow the container width.
+        style={{ ...style, overflowX: "scroll", overflowY: "auto" }}
         {...rest}
         onScroll={(e) => {
           onScroll?.(e);
@@ -78,7 +88,7 @@ export default function VirtualizedTable({ columns, rows, height = 480 }) {
         </div>
       </div>
       <FixedSizeList
-        height={height}
+        height={listHeight}
         width="100%"
         itemCount={rows.length}
         itemSize={ROW_HEIGHT}

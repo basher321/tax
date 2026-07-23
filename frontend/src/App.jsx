@@ -116,14 +116,14 @@ export default function App() {
       </aside>
 
       <div className="min-w-0 flex-1">
-        <header className="sticky top-0 z-10 border-b border-rule bg-paper/95 px-8 py-5 backdrop-blur">
+        <header className="sticky top-0 z-10 border-b border-rule bg-paper/95 px-6 py-2.5 backdrop-blur">
           <div className="flex items-center justify-between gap-4">
             <div>
               <div className="font-mono text-xs uppercase text-ink/45">
                 Tax certificate module
               </div>
-              <h1 className="mt-1 text-2xl font-semibold">{page.title}</h1>
-              <p className="mt-1 text-sm text-ink/60">{page.description}</p>
+              <h1 className="mt-0.5 text-xl font-semibold leading-tight">{page.title}</h1>
+              <p className="mt-0.5 text-sm text-ink/60">{page.description}</p>
             </div>
             <div className="flex items-center gap-3">
               {!companiesLoading && companies.length > 0 && (
@@ -140,8 +140,9 @@ export default function App() {
                   </select>
                 </div>
               )}
-              <div className="rounded border border-rule bg-white px-3 py-2 text-right text-xs text-ink/60 shadow-sm">
-                <span className="block font-medium text-ink">System ready</span>
+              <div className="rounded border border-rule bg-white px-2.5 py-1 text-xs text-ink/60 shadow-sm whitespace-nowrap">
+                <span className="font-medium text-ink">System ready</span>
+                <span className="mx-1 text-ink/30">&middot;</span>
                 PostgreSQL connected
               </div>
             </div>

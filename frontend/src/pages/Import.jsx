@@ -169,7 +169,7 @@ function DepotPanel({ companyId }) {
             </span>
           </div>
           <div className="p-3">
-            <VirtualizedTable columns={COLUMNS} rows={rows} height={560} />
+            <VirtualizedTable columns={COLUMNS} rows={rows} />
           </div>
         </div>
       )}
