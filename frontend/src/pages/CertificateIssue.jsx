@@ -791,42 +791,41 @@ export default function CertificateIssue() {
           <h2 className="font-medium mr-auto">Pending <span className="text-ink/40 font-normal">({pending.length})</span></h2>
           <button className="btn-primary" onClick={generateBulk}>Generate selected</button>
         </div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-xs uppercase tracking-wide text-ink/50 border-b border-rule">
-              <th className="px-5 py-2 w-8"></th><th className="py-2">Supplier</th>
-              <th>TIN</th><th>Period</th><th>Payment dates</th><th className="text-right">Rows</th>
-              <th className="text-right">Payment</th><th className="text-right pr-3">TDS</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {pending.slice(0, 15).map((g) => {
-              const key = `${g.tin}|${g.period}`;
-              return (
-                <tr key={key} className="border-b border-rule/60">
-                  <td className="px-5"><input type="checkbox" checked={!!checked[key]}
-                    onChange={(e) => setChecked({ ...checked, [key]: e.target.checked })} /></td>
-                  <td className="py-1.5">{g.supplier_name}</td>
-                  <td className="font-mono">{g.tin}</td>
-                  <td>{g.period}</td>
-                  <td>{g.payment_from || ""}{g.payment_to && g.payment_to !== g.payment_from ? ` to ${g.payment_to}` : ""}</td>
-                  <td className="text-right">{g.row_count}</td>
-                  <td className="text-right font-mono">{fmt(g.total_payment)}</td>
-                  <td className="text-right font-mono pr-3">{fmt(g.total_tax_deducted)}</td>
-                  <td className="pr-4 text-right">
-                    <button className="btn-ghost !py-0.5" onClick={() => generateOne(g)}>Generate Certificate</button>
-                  </td>
-                </tr>
-              );
-            })}
-            {pending.length === 0 && (
-              <tr><td colSpan={9} className="p-5 text-ink/50">No pending groupings match these filters.</td></tr>
-            )}
-          </tbody>
-        </table>
-        {pending.length > 15 && (
-          <p className="px-5 py-2 text-xs text-ink/50">{pending.length - 15} more. Narrow with the search above.</p>
-        )}
+        <div className="pending-scroll max-h-96 overflow-y-auto overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10 bg-white">
+              <tr className="text-left text-xs uppercase tracking-wide text-ink/50 border-b border-rule">
+                <th className="px-5 py-2 w-8"></th><th className="py-2">Supplier</th>
+                <th>TIN</th><th>Period</th><th>Payment dates</th><th className="text-right">Rows</th>
+                <th className="text-right">Payment</th><th className="text-right pr-3">TDS</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {pending.map((g) => {
+                const key = `${g.tin}|${g.period}`;
+                return (
+                  <tr key={key} className="border-b border-rule/60">
+                    <td className="px-5"><input type="checkbox" checked={!!checked[key]}
+                      onChange={(e) => setChecked({ ...checked, [key]: e.target.checked })} /></td>
+                    <td className="py-1.5">{g.supplier_name}</td>
+                    <td className="font-mono">{g.tin}</td>
+                    <td>{g.period}</td>
+                    <td>{g.payment_from || ""}{g.payment_to && g.payment_to !== g.payment_from ? ` to ${g.payment_to}` : ""}</td>
+                    <td className="text-right">{g.row_count}</td>
+                    <td className="text-right font-mono">{fmt(g.total_payment)}</td>
+                    <td className="text-right font-mono pr-3">{fmt(g.total_tax_deducted)}</td>
+                    <td className="pr-4 text-right">
+                      <button className="btn-ghost !py-0.5" onClick={() => generateOne(g)}>Generate Certificate</button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {pending.length === 0 && (
+                <tr><td colSpan={9} className="p-5 text-ink/50">No pending groupings match these filters.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* Generated certificates */}
