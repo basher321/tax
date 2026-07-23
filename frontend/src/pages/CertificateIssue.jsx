@@ -84,17 +84,25 @@ function Preview({ certId, onClose }) {
   useEffect(() => { load(); }, [certId]);
 
   async function saveRemarks() {
-    const c = await api.updateRemarks(certId, remarks);
-    setCert(c);
-    setImgVersion((v) => v + 1);
-    showNotice("Remarks saved - certificate re-rendered.");
+    try {
+      const c = await api.updateRemarks(certId, remarks);
+      setCert(c);
+      setImgVersion((v) => v + 1);
+      showNotice("Remarks saved - certificate re-rendered.");
+    } catch (err) {
+      showNotice(`Could not save remarks: ${err.message}`, "err");
+    }
   }
 
   async function setTinStatus(has12DigitTin) {
-    const c = await api.updateTinStatus(certId, has12DigitTin);
-    setCert(c);
-    setImgVersion((v) => v + 1);
-    showNotice("TIN status saved - certificate re-rendered.");
+    try {
+      const c = await api.updateTinStatus(certId, has12DigitTin);
+      setCert(c);
+      setImgVersion((v) => v + 1);
+      showNotice("TIN status saved - certificate re-rendered.");
+    } catch (err) {
+      showNotice(`Could not save TIN status: ${err.message}`, "err");
+    }
   }
 
   async function saveIssueDate() {
@@ -102,26 +110,38 @@ function Preview({ certId, onClose }) {
       showNotice("Pick a date for Manual mode before saving.", "warn");
       return;
     }
-    const c = await api.updateIssueDate(certId, dateMode, dateMode === "manual" ? manualDate : null);
-    setCert(c);
-    setManualDate(c.issue_date || "");
-    setImgVersion((v) => v + 1);
-    showNotice("Issue date saved - certificate re-rendered.");
+    try {
+      const c = await api.updateIssueDate(certId, dateMode, dateMode === "manual" ? manualDate : null);
+      setCert(c);
+      setManualDate(c.issue_date || "");
+      setImgVersion((v) => v + 1);
+      showNotice("Issue date saved - certificate re-rendered.");
+    } catch (err) {
+      showNotice(`Could not save issue date: ${err.message}`, "err");
+    }
   }
 
   async function savePaymentDate() {
-    const c = await api.updatePaymentDate(certId, paymentDate || null);
-    setCert(c);
-    setPaymentDate(c.payment_date || "");
-    setImgVersion((v) => v + 1);
-    showNotice("Payment date saved - certificate re-rendered.");
+    try {
+      const c = await api.updatePaymentDate(certId, paymentDate || null);
+      setCert(c);
+      setPaymentDate(c.payment_date || "");
+      setImgVersion((v) => v + 1);
+      showNotice("Payment date saved - certificate re-rendered.");
+    } catch (err) {
+      showNotice(`Could not save payment date: ${err.message}`, "err");
+    }
   }
 
   async function savePayee() {
-    const c = await api.updatePayee(certId, payeeForm);
-    setCert(c);
-    setImgVersion((v) => v + 1);
-    showNotice("Payee details saved - certificate re-rendered, and the linked Import rows updated too.");
+    try {
+      const c = await api.updatePayee(certId, payeeForm);
+      setCert(c);
+      setImgVersion((v) => v + 1);
+      showNotice("Payee details saved - certificate re-rendered, and the linked Import rows updated too.");
+    } catch (err) {
+      showNotice(`Could not save payee details: ${err.message}`, "err");
+    }
   }
 
   function setLineField(id, field, value) {
@@ -133,29 +153,33 @@ function Preview({ certId, onClose }) {
   }
 
   async function saveLines() {
-    const c = await api.updateLines(certId, {
-      lines: linesForm.map((l) => ({
-        id: l.id,
-        date_of_payment: l.date_of_payment || null,
-        description: l.description,
-        section: l.section,
-        amount_of_payment: l.amount_of_payment === "" || l.amount_of_payment == null ? null : Number(l.amount_of_payment),
-        amount_of_tax_deducted: l.amount_of_tax_deducted === "" || l.amount_of_tax_deducted == null ? null : Number(l.amount_of_tax_deducted),
-      })),
-      challan_lines: challanForm.map((cl) => ({
-        id: cl.id,
-        challan_number: cl.challan_number,
-        challan_date: cl.challan_date || null,
-        bank_name: cl.bank_name,
-        total_challan_amount: cl.total_challan_amount === "" || cl.total_challan_amount == null ? null : Number(cl.total_challan_amount),
-        amount_related: cl.amount_related === "" || cl.amount_related == null ? null : Number(cl.amount_related),
-      })),
-    });
-    setCert(c);
-    setLinesForm(c.lines.map((l) => ({ ...l })));
-    setChallanForm(c.challan_lines.map((cl) => ({ ...cl })));
-    setImgVersion((v) => v + 1);
-    showNotice("Line items saved - certificate re-rendered, and the linked Import rows updated too.");
+    try {
+      const c = await api.updateLines(certId, {
+        lines: linesForm.map((l) => ({
+          id: l.id,
+          date_of_payment: l.date_of_payment || null,
+          description: l.description,
+          section: l.section,
+          amount_of_payment: l.amount_of_payment === "" || l.amount_of_payment == null ? null : Number(l.amount_of_payment),
+          amount_of_tax_deducted: l.amount_of_tax_deducted === "" || l.amount_of_tax_deducted == null ? null : Number(l.amount_of_tax_deducted),
+        })),
+        challan_lines: challanForm.map((cl) => ({
+          id: cl.id,
+          challan_number: cl.challan_number,
+          challan_date: cl.challan_date || null,
+          bank_name: cl.bank_name,
+          total_challan_amount: cl.total_challan_amount === "" || cl.total_challan_amount == null ? null : Number(cl.total_challan_amount),
+          amount_related: cl.amount_related === "" || cl.amount_related == null ? null : Number(cl.amount_related),
+        })),
+      });
+      setCert(c);
+      setLinesForm(c.lines.map((l) => ({ ...l })));
+      setChallanForm(c.challan_lines.map((cl) => ({ ...cl })));
+      setImgVersion((v) => v + 1);
+      showNotice("Line items saved - certificate re-rendered, and the linked Import rows updated too.");
+    } catch (err) {
+      showNotice(`Could not save line items: ${err.message}`, "err");
+    }
   }
 
   async function sendEmail() {
