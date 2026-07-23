@@ -57,9 +57,6 @@ class Company(Base):
     seal_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # PNG w/ alpha
     letterhead_header_data: Mapped[bytes | None] = mapped_column(LargeBinary)
     letterhead_footer_data: Mapped[bytes | None] = mapped_column(LargeBinary)
-    officer_name: Mapped[str | None] = mapped_column(String(255))
-    officer_designation: Mapped[str | None] = mapped_column(String(255))
-    officer_email: Mapped[str | None] = mapped_column(String(255))
     default_bank_name: Mapped[str | None] = mapped_column(String(255))
     default_description: Mapped[str | None] = mapped_column(
         String(255), default="Supply of Goods"
@@ -350,9 +347,6 @@ class OrgSettings(Base):
     seal_signature_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # legacy combined PNG w/ alpha
     signature_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # PNG w/ alpha, preferred over the legacy combined field
     seal_data: Mapped[bytes | None] = mapped_column(LargeBinary)  # PNG w/ alpha, preferred over the legacy combined field
-    officer_name: Mapped[str | None] = mapped_column(String(255))
-    officer_designation: Mapped[str | None] = mapped_column(String(255))
-    officer_email: Mapped[str | None] = mapped_column(String(255))
     default_bank_name: Mapped[str | None] = mapped_column(String(255))
     default_description: Mapped[str | None] = mapped_column(
         String(255), default="Supply of Goods"

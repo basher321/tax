@@ -36,7 +36,7 @@ def tracking_pixel_url(job_id: int) -> str:
 
 def _smtp_config(org: OrgSettings) -> tuple[str, int, str]:
     host = (org.smtp_host or "").strip()
-    sender = (org.smtp_from or org.smtp_user or org.officer_email or "").strip()
+    sender = (org.smtp_from or org.smtp_user or "").strip()
     if not (host and sender):
         raise RuntimeError("SMTP is not configured in Settings")
     return host, int(org.smtp_port or 587), sender
@@ -86,7 +86,7 @@ def send_certificate_email(org: OrgSettings, cert: Certificate, recipient: str, 
         f"Dear {cert.supplier.name},\n\n"
         f"Please find attached the Certificate of Deduction of Tax "
         f"({cert.certificate_no}) for the period {cert.period}.\n\n"
-        f"Regards,\n{org.officer_name or ''}\n{org.officer_designation or ''}"
+        f"Regards,"
     )
 
     msg = EmailMessage()
@@ -115,9 +115,9 @@ def send_certificate_email(org: OrgSettings, cert: Certificate, recipient: str, 
 
 def send_test_email(org: OrgSettings, recipient: str | None = None) -> str:
     _, _, sender = _smtp_config(org)
-    to_addr = (recipient or org.officer_email or sender).strip()
+    to_addr = (recipient or sender).strip()
     if not to_addr:
-        raise RuntimeError("Enter an officer email or from address for the test email")
+        raise RuntimeError("Enter a recipient or configure a from address for the test email")
 
     msg = EmailMessage()
     msg["Subject"] = "Tax Certificate SMTP test"

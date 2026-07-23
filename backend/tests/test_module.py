@@ -333,11 +333,10 @@ def test_missing_challan_anomaly(db, company, sample_xlsx):
 
 
 def _make_clean_certificate(db, company, sample_xlsx):
-    """Beta Supplies has email+WhatsApp+challan mapped; with company seal and
-    officer filled in, its certificate should have zero anomalies."""
+    """Beta Supplies has email+WhatsApp+challan mapped; with company seal
+    filled in, its certificate should have zero anomalies."""
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
     company.seal_data = _TINY_PNG
-    company.officer_name, company.officer_designation, company.officer_email = "A", "B", "c@d.com"
     db.commit()
     return generate_certificate(db, company.id, "444455556666", "2025-26")
 
@@ -485,7 +484,7 @@ def test_offline_queue_blocks_then_overrides_then_drains(db, company, sample_xls
     org.dispatch_mode = "offline"
     db.commit()
 
-    # Anomalies (missing seal/officer) block dispatch without an override.
+    # Anomalies (missing seal) block dispatch without an override.
     with pytest.raises(DispatchBlocked) as exc:
         enqueue_dispatch(db, cert, DispatchChannel.EMAIL, ["beta@example.com"])
     assert any(a.code == "MISSING_SEAL" for a in exc.value.anomalies)
@@ -533,7 +532,6 @@ def test_queue_retries_and_fails_after_max_attempts(db, company, sample_xlsx, mo
 def test_send_test_email_uses_settings_and_recipient(db, monkeypatch):
     org = get_org_settings(db)
     org.company_name = "Acme Ltd"
-    org.officer_email = "officer@example.com"
     org.smtp_host = "smtp.example.com"
     org.smtp_port = 587
     org.smtp_from = "tax@example.com"
@@ -564,11 +562,12 @@ def test_send_test_email_uses_settings_and_recipient(db, monkeypatch):
 
     monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
 
-    assert send_test_email(org) == "officer@example.com"
+    # No explicit recipient -> falls back to the configured sender address.
+    assert send_test_email(org) == "tax@example.com"
     assert sent["connect"] == ("smtp.example.com", 587, 30)
     assert sent["tls"] is True
     assert sent["login"] == ("tax@example.com", "app-password")
-    assert sent["to"] == "officer@example.com"
+    assert sent["to"] == "tax@example.com"
     assert "tax@example.com" in sent["from"]
     assert sent["subject"] == "Tax Certificate SMTP test"
 
@@ -756,8 +755,6 @@ def test_missing_seal_anomaly_satisfied_by_company_seal(db, company, sample_xlsx
     import_depot_workbook(db, sample_xlsx, "sample.xlsx", company.id)
     cert = generate_certificate(db, company.id, "111122223333", "2025-26")
     org = get_org_settings(db)
-    company.officer_name, company.officer_designation, company.officer_email = "A", "B", "c@d.com"
-    db.commit()
 
     codes = {a.code for a in check_certificate(db, cert, org)}
     assert "MISSING_SEAL" in codes  # no seal uploaded yet

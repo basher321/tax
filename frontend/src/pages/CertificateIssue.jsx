@@ -187,7 +187,7 @@ function Preview({ certId, onClose }) {
     setEmailBusy(true);
     try {
       const org = await api.getOrg();
-      if (!org.smtp_host || !(org.smtp_from || org.smtp_user || org.officer_email)) {
+      if (!org.smtp_host || !(org.smtp_from || org.smtp_user)) {
         openManualEmail();
         showNotice("SMTP is not configured. Gmail compose and the PDF opened in separate windows; attach the PDF manually, or configure SMTP in Settings for automatic attachment.", "warn");
         return;

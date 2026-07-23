@@ -660,13 +660,12 @@ def whatsapp_links(cert_id: int, db: Session = Depends(get_db)):
 
     org = get_org_settings(db)
     company = cert.company
-    officer_name = (company and company.officer_name) or org.officer_name or ""
     company_name = (company and company.name) or org.company_name
     message = (
         f"Dear {cert.supplier.name},\n\n"
         f"Your Certificate of Deduction of Tax {cert.certificate_no} "
         f"for the period {cert.period} is attached.\n\n"
-        f"Regards,\n{officer_name}"
+        f"Regards,"
         + (f"\n{company_name}" if company_name else "")
     )
     numbers = [c.value for c in cert.supplier.contacts

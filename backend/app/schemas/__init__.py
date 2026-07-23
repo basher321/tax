@@ -245,9 +245,6 @@ class CompanyOut(ORM):
     has_seal: bool
     has_letterhead_header: bool
     has_letterhead_footer: bool
-    officer_name: str | None
-    officer_designation: str | None
-    officer_email: str | None
     default_bank_name: str | None
     default_description: str | None
     is_default: bool
@@ -256,9 +253,6 @@ class CompanyOut(ORM):
 class CompanyCreate(BaseModel):
     name: str
     address: str | None = None
-    officer_name: str | None = None
-    officer_designation: str | None = None
-    officer_email: str | None = None
     default_bank_name: str | None = None
     default_description: str | None = None
     is_default: bool = False
@@ -275,9 +269,6 @@ class CompanyCreate(BaseModel):
 class CompanyUpdate(BaseModel):
     name: str | None = None
     address: str | None = None
-    officer_name: str | None = None
-    officer_designation: str | None = None
-    officer_email: str | None = None
     default_bank_name: str | None = None
     default_description: str | None = None
     is_default: bool | None = None
@@ -336,9 +327,6 @@ class BulkDispatchResultOut(BaseModel):
 class OrgSettingsIn(BaseModel):
     company_name: str | None = None
     company_address: str | None = None
-    officer_name: str | None = None
-    officer_designation: str | None = None
-    officer_email: str | None = None
     default_bank_name: str | None = None
     default_description: str | None = None
     smtp_host: str | None = None

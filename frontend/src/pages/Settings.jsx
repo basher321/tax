@@ -427,9 +427,9 @@ export default function Settings() {
         <button className="btn-primary" onClick={() => saveCompany()}>Save company details</button>
       </section>
 
-      {/* Seal + designated officer (per company) */}
+      {/* Seal (per company) */}
       <section className="card p-5 space-y-3">
-        <h2 className="font-medium">Seal &amp; designated officer</h2>
+        <h2 className="font-medium">Seal</h2>
         <p className="text-sm text-ink/60">
           The seal renders below the issue date in the footer's Seal block, separate from the
           signatures configured below.
@@ -445,12 +445,7 @@ export default function Settings() {
             </label>
           </div>
         </Field>
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="Officer name"><input className="input" value={companyForm.officer_name || ""} onChange={setC("officer_name")} /></Field>
-          <Field label="Designation"><input className="input" value={companyForm.officer_designation || ""} onChange={setC("officer_designation")} /></Field>
-          <Field label="Officer email"><input className="input" value={companyForm.officer_email || ""} onChange={setC("officer_email")} /></Field>
-        </div>
-        <button className="btn-primary" onClick={() => saveCompany("Seal & officer details saved.")}>Save seal &amp; officer details</button>
+        <button className="btn-primary" onClick={() => saveCompany("Seal saved.")}>Save seal</button>
       </section>
 
       <SignaturesSection companyId={companyId} notify={notify} />

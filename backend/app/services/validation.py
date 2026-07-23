@@ -110,10 +110,5 @@ def check_certificate(db: Session, cert: Certificate, org: OrgSettings) -> list[
     )
     if not has_seal:
         anomalies.append(Anomaly("MISSING_SEAL", "Seal/signature image not uploaded in Settings"))
-    officer_name = (company and company.officer_name) or org.officer_name
-    officer_designation = (company and company.officer_designation) or org.officer_designation
-    officer_email = (company and company.officer_email) or org.officer_email
-    if not (officer_name and officer_designation and officer_email):
-        anomalies.append(Anomaly("MISSING_OFFICER", "Designated officer details incomplete in Settings"))
 
     return anomalies
