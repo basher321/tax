@@ -104,11 +104,10 @@ class ImportBatchOut(ORM):
     error_rows: int
     created_at: datetime
     errors: list[ImportErrorOut] = []
-    rows: list[dict] | None = None
-    columns: list[str] | None = None
 
 
 class CertLineOut(ORM):
+    id: int
     sl: int
     date_of_payment: date | None
     description: str | None
@@ -119,6 +118,7 @@ class CertLineOut(ORM):
 
 
 class ChallanLineOut(ORM):
+    id: int
     sl: int
     challan_number: str | None
     challan_date: date | None
@@ -136,6 +136,7 @@ class CertificateOut(ORM):
     period: str
     period_from: date | None
     period_to: date | None
+    payment_date: date | None
     total_payment: float
     total_tax_deducted: float
     amount_in_words: str | None
@@ -186,6 +187,43 @@ class IssueDateUpdate(BaseModel):
         if v not in ("auto", "manual"):
             raise ValueError("mode must be 'auto' or 'manual'")
         return v
+
+
+class PaymentDateUpdate(BaseModel):
+    payment_date: date | None = None
+
+
+class PayeeUpdate(BaseModel):
+    """Row 1/2/4 of the certificate — name, address, and TIN of the payee.
+    Propagates to the Supplier record and, for the transactions this
+    certificate's lines were generated from, the Import page's rows too."""
+
+    name: str | None = None
+    address: str | None = None
+    tin: str | None = None
+
+
+class CertLineUpdate(BaseModel):
+    id: int
+    date_of_payment: date | None = None
+    description: str | None = None
+    section: str | None = None
+    amount_of_payment: float | None = None
+    amount_of_tax_deducted: float | None = None
+
+
+class ChallanLineUpdate(BaseModel):
+    id: int
+    challan_number: str | None = None
+    challan_date: date | None = None
+    bank_name: str | None = None
+    total_challan_amount: float | None = None
+    amount_related: float | None = None
+
+
+class CertificateLinesUpdate(BaseModel):
+    lines: list[CertLineUpdate] = []
+    challan_lines: list[ChallanLineUpdate] = []
 
 
 class DispatchRequest(BaseModel):
@@ -271,6 +309,7 @@ class BulkFilterRequest(BaseModel):
     supplier_name: str | None = None
     date_from: date | None = None
     date_to: date | None = None
+    payment_date: date | None = None
     status: str | None = None
 
 

@@ -9,6 +9,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import and_, func, or_, true
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -42,6 +43,7 @@ from ..schemas import (
     BulkFilterRequest,
     BulkGenerateRequest,
     CertificateDetailOut,
+    CertificateLinesUpdate,
     CertificateOut,
     CompanyCreate,
     CompanyOut,
@@ -53,6 +55,8 @@ from ..schemas import (
     IssueDateUpdate,
     NumberingIn,
     OrgSettingsIn,
+    PayeeUpdate,
+    PaymentDateUpdate,
     RateUpdateIn,
     RemarksUpdate,
     SignatureOut,
@@ -65,6 +69,7 @@ from ..schemas import (
 )
 from ..services import rate_hook
 from ..services.aggregation import list_groupings
+from ..services.amount_in_words import amount_in_words
 from ..services.certificate_generator import (
     GenerationError,
     generate_certificate,
@@ -77,10 +82,7 @@ from ..services.dispatch.email_sender import send_test_email, verify_job_sig
 from ..services.dispatch.whatsapp_sender import verify_certificate_sig
 from ..services.excel_export import export_certificates_to_excel
 from ..services.pdf_renderer import render_certificate_pdf
-from ..services.excel_import import (
-    import_depot_workbook,
-    load_depot_sheet,
-)
+from ..services.excel_import import import_depot_workbook
 from ..services.numbering import get_numbering_config
 from ..services.validation import check_certificate
 
@@ -107,6 +109,8 @@ def _certificates_matching(db: Session, f: BulkFilterRequest):
             or_(Certificate.period_from.is_(None), Certificate.period_from <= f.date_to) if f.date_to else true(),
         )
         q = q.filter(or_(issue_in_range, period_overlaps))
+    if f.payment_date:
+        q = q.filter(Certificate.payment_date == f.payment_date)
     if f.status:
         q = q.filter(Certificate.status == f.status)
     else:
@@ -139,30 +143,14 @@ def upload_depot(company_id: int = Form(...), file: UploadFile = File(...), db: 
         raise HTTPException(422, "Upload an .xlsx workbook")
     path = _save_upload(file)
     try:
-        batch = import_depot_workbook(db, path, file.filename or "upload.xlsx", company_id)
-        columns, raw_rows = load_depot_sheet(path)
-        rows = []
-        for r in raw_rows:
-            row = {"__excel_row": int(r["__excel_row"])}
-            for c in columns:
-                v = r.get(c)
-                if v is None:
-                    row[c] = ""
-                elif isinstance(v, (datetime, date)):
-                    row[c] = v.strftime("%d/%m/%Y")
-                else:
-                    row[c] = str(v)
-            rows.append(row)
-        out = ImportBatchOut.model_validate(batch)
-        out.rows = rows
-        out.columns = columns
-        return out
-    except (BadZipFile, ValueError) as e:
+        # The uploaded rows are persisted straight to the Transaction table
+        # and browsed afterward via the paginated GET /import/rows below —
+        # a 50k+ row workbook returned inline here would risk the response
+        # itself becoming too large, on top of being redundant with the DB.
+        return import_depot_workbook(db, path, file.filename or "upload.xlsx", company_id)
+    except BadZipFile as e:
         db.rollback()
         raise HTTPException(422, f"Could not read workbook: {e}")
-    except Exception as e:  # noqa: BLE001 - keep upload failures user-readable
-        db.rollback()
-        raise HTTPException(422, f"Could not import workbook: {e}")
     finally:
         if os.path.exists(path):
             os.unlink(path)
@@ -174,6 +162,70 @@ def list_batches(company_id: int | None = None, db: Session = Depends(get_db)):
     if company_id is not None:
         q = q.filter(ImportBatch.company_id == company_id)
     return q.order_by(ImportBatch.created_at.desc()).limit(50).all()
+
+
+# Canonical column order the Import page's table renders, matching the
+# Depot-SCB template — sourced from the Transaction table (not re-read from
+# the uploaded file), so a batch's rows are browsable/paginated after the
+# fact and reflect any later edits (e.g. from an in-place certificate edit).
+IMPORT_DISPLAY_COLUMNS = [
+    "Payment Date", "Cheque Number", "Supplier Name", "Supplier Address",
+    "WhatsApp No.", "Email", "Depot Code", "Sum of Bill Amount", "Sum of TDS",
+    "Base Amount", "TDS Rate", "Section", "TIN", "Challan No", "Challan Date",
+    "Bank Name", "Description of Payment", "Cheque/Challan SL", "Month",
+    "Total Challan Amount", "Remarks",
+]
+
+
+def _transaction_row(t: Transaction) -> dict:
+    return {
+        "__id": t.id,
+        "Payment Date": t.cheque_date.strftime("%d/%m/%Y") if t.cheque_date else "",
+        "Cheque Number": t.cheque_number or "",
+        "Supplier Name": t.supplier_name or "",
+        "Supplier Address": t.supplier_address or "",
+        "WhatsApp No.": t.whatsapp_no or "",
+        "Email": t.email or "",
+        "Depot Code": t.depot_code or "",
+        "Sum of Bill Amount": t.sum_of_bill_amount if t.sum_of_bill_amount is not None else "",
+        "Sum of TDS": t.sum_of_tds if t.sum_of_tds is not None else "",
+        "Base Amount": t.base_amount if t.base_amount is not None else "",
+        "TDS Rate": t.tds_rate if t.tds_rate is not None else "",
+        "Section": t.section or "",
+        "TIN": t.tin or "",
+        "Challan No": t.challan_no or "",
+        "Challan Date": t.challan_date.strftime("%d/%m/%Y") if t.challan_date else "",
+        "Bank Name": t.bank_name or "",
+        "Description of Payment": t.description_of_payment or "",
+        "Cheque/Challan SL": t.cheque_challan_sl or "",
+        "Month": t.month or "",
+        "Total Challan Amount": t.total_challan_amount if t.total_challan_amount is not None else "",
+        "Remarks": t.remarks or "",
+    }
+
+
+@router.get("/import/rows")
+def import_rows(
+    company_id: int,
+    batch_id: int | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(2000, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    """Paginated read of imported rows, straight from the Transaction table —
+    the Import page fetches this in a loop to build up its (virtualized)
+    table, which keeps any single response well under serverless response
+    size limits even for 50k+ row workbooks."""
+    q = db.query(Transaction).filter(Transaction.company_id == company_id)
+    if batch_id is not None:
+        q = q.filter(Transaction.batch_id == batch_id)
+    total = q.count()
+    items = q.order_by(Transaction.id).offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "columns": IMPORT_DISPLAY_COLUMNS,
+        "rows": [_transaction_row(t) for t in items],
+    }
 
 
 # ---------------------------------------------------------- Certificates ----
@@ -209,12 +261,13 @@ def search_certificates(
     supplier_name: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    payment_date: date | None = None,
     status: str | None = None,
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
-    """Combinable search: TIN, BIN, Supplier Name, Date range. Paginated."""
+    """Combinable search: TIN, BIN, Supplier Name, Date range, Payment Date. Paginated."""
     q = db.query(Certificate).join(Supplier).filter(Certificate.company_id == company_id)
     if tin:
         q = q.filter(Certificate.tin.like(f"%{tin}%"))
@@ -234,6 +287,8 @@ def search_certificates(
             or_(Certificate.period_from.is_(None), Certificate.period_from <= date_to) if date_to else true(),
         )
         q = q.filter(or_(issue_in_range, period_overlaps))
+    if payment_date:
+        q = q.filter(Certificate.payment_date == payment_date)
     if status:
         q = q.filter(Certificate.status == status)
     total = q.count()
@@ -357,6 +412,109 @@ def update_issue_date(cert_id: int, body: IssueDateUpdate, db: Session = Depends
         cert.issue_date = date.today()
     cert.issue_date_mode = body.mode
     regenerate_pdf(db, cert)  # re-render so the PDF reflects the new date
+    return cert
+
+
+@router.patch("/certificates/{cert_id}/payment-date", response_model=CertificateDetailOut)
+def update_payment_date(cert_id: int, body: PaymentDateUpdate, db: Session = Depends(get_db)):
+    """Row 5 Payment Date — editable, searchable (see GET /certificates)."""
+    cert = db.get(Certificate, cert_id)
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+    cert.payment_date = body.payment_date
+    regenerate_pdf(db, cert)  # re-render so the PDF reflects the new date
+    return cert
+
+
+@router.patch("/certificates/{cert_id}/payee", response_model=CertificateDetailOut)
+def update_payee(cert_id: int, body: PayeeUpdate, db: Session = Depends(get_db)):
+    """Rows 1/2/4 — payee name, address, TIN. Propagates to the Supplier
+    record and to every Transaction row this certificate's lines were
+    generated from, so the Import page's table shows the same correction."""
+    cert = db.get(Certificate, cert_id)
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+
+    supplier = cert.supplier
+    if body.name is not None:
+        supplier.name = body.name
+    if body.address is not None:
+        supplier.address = body.address
+    if body.tin is not None:
+        cert.tin = body.tin
+        supplier.tin = body.tin
+
+    txn_ids = {ln.transaction_id for ln in cert.lines if ln.transaction_id}
+    txn_ids |= {cl.transaction_id for cl in cert.challan_lines if cl.transaction_id}
+    if txn_ids:
+        for t in db.query(Transaction).filter(Transaction.id.in_(txn_ids)):
+            if body.name is not None:
+                t.supplier_name = body.name
+            if body.address is not None:
+                t.supplier_address = body.address
+            if body.tin is not None:
+                t.tin = body.tin
+
+    try:
+        regenerate_pdf(db, cert)  # re-render so the PDF reflects the new payee info
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Another supplier already uses that TIN for this company")
+    return cert
+
+
+@router.patch("/certificates/{cert_id}/lines", response_model=CertificateDetailOut)
+def update_lines(cert_id: int, body: CertificateLinesUpdate, db: Session = Depends(get_db)):
+    """Every Section 06/07 line, editable in place. Recomputes the
+    certificate's totals from the edited lines and, for each line linked to
+    the Transaction row it was generated from, propagates the same edit
+    there too — so the Import page's table stays in sync."""
+    cert = db.get(Certificate, cert_id)
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+
+    lines_by_id = {ln.id: ln for ln in cert.lines}
+    for item in body.lines:
+        ln = lines_by_id.get(item.id)
+        if ln is None:
+            raise HTTPException(404, f"Line {item.id} not found on this certificate")
+        ln.date_of_payment = item.date_of_payment
+        ln.description = item.description
+        ln.section = item.section
+        ln.amount_of_payment = item.amount_of_payment
+        ln.amount_of_tax_deducted = item.amount_of_tax_deducted
+        if ln.transaction_id:
+            t = db.get(Transaction, ln.transaction_id)
+            if t:
+                t.cheque_date = item.date_of_payment
+                t.description_of_payment = item.description
+                t.section = item.section
+                t.sum_of_bill_amount = item.amount_of_payment
+                t.sum_of_tds = item.amount_of_tax_deducted
+
+    challan_by_id = {cl.id: cl for cl in cert.challan_lines}
+    for item in body.challan_lines:
+        cl = challan_by_id.get(item.id)
+        if cl is None:
+            raise HTTPException(404, f"Challan line {item.id} not found on this certificate")
+        cl.challan_number = item.challan_number
+        cl.challan_date = item.challan_date
+        cl.bank_name = item.bank_name
+        cl.total_challan_amount = item.total_challan_amount
+        cl.amount_related = item.amount_related
+        if cl.transaction_id:
+            t = db.get(Transaction, cl.transaction_id)
+            if t:
+                t.challan_no = item.challan_number
+                t.challan_date = item.challan_date
+                t.bank_name = item.bank_name
+                t.total_challan_amount = item.total_challan_amount
+
+    db.flush()
+    cert.total_payment = round(sum(ln.amount_of_payment or 0 for ln in cert.lines), 2)
+    cert.total_tax_deducted = round(sum(ln.amount_of_tax_deducted or 0 for ln in cert.lines), 2)
+    cert.amount_in_words = amount_in_words(cert.total_tax_deducted)
+    regenerate_pdf(db, cert)  # re-render so the PDF reflects the edited lines
     return cert
 
 

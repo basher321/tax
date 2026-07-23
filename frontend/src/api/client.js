@@ -82,6 +82,11 @@ export const api = {
     return request("/import/depot", { method: "POST", body: fd });
   },
   importBatches: (companyId) => request(`/import/batches?company_id=${companyId}`),
+  // Paginated read of imported rows straight from the database — used in a
+  // loop to build up the Import page's virtualized table without any one
+  // response getting too large for a large (50,000+ row) workbook.
+  importRows: (companyId, batchId, page, pageSize) =>
+    request(`/import/rows?${qs({ company_id: companyId, batch_id: batchId, page, page_size: pageSize })}`),
 
   // ---- Certificates ----
   pendingGroupings: (companyId, filters = {}) =>
@@ -109,6 +114,14 @@ export const api = {
     request(`/certificates/${id}/issue-date`, {
       method: "PATCH", body: JSON.stringify({ mode, issue_date: issueDate || null }),
     }),
+  updatePaymentDate: (id, paymentDate) =>
+    request(`/certificates/${id}/payment-date`, {
+      method: "PATCH", body: JSON.stringify({ payment_date: paymentDate || null }),
+    }),
+  updatePayee: (id, body) =>
+    request(`/certificates/${id}/payee`, { method: "PATCH", body: JSON.stringify(body) }),
+  updateLines: (id, body) =>
+    request(`/certificates/${id}/lines`, { method: "PATCH", body: JSON.stringify(body) }),
   anomalies: (id) => request(`/certificates/${id}/anomalies`),
   anomaliesBulk: (filters) =>
     request("/certificates/anomalies/bulk", { method: "POST", body: JSON.stringify(dropBlank(filters)) }),

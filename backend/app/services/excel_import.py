@@ -1,10 +1,10 @@
 """Excel import service for the Depot-SCB sheet.
 
 Parses the workbook directly with openpyxl — no Excel formula evaluation
-happens at runtime. Row-level validation errors are recorded (never
-aborting the whole import for one bad row).
+happens at runtime. Every row is accepted and stored as-is: no required-field,
+TIN-format, or number/date-parse checks reject or skip a row. Values that
+don't parse (e.g. an unparseable date) are simply stored as null.
 """
-import json
 import math
 import re
 from datetime import date, datetime
@@ -15,16 +15,18 @@ from sqlalchemy.orm import Session, joinedload
 from ..models.entities import (
     ContactKind,
     ImportBatch,
-    ImportRowError,
     Supplier,
     SupplierContact,
     Transaction,
 )
 
-# The 21 source columns, exactly as named in the sheet, mapped to DB fields.
-# ("Challan No" appears without a trailing dot in the file; we accept both.)
+# The source columns, exactly as named in the sheet, mapped to DB fields.
+# ("Challan No" appears without a trailing dot in the file; we accept both.
+# "Payment Date" is the current template header; "Cheque Date" is accepted
+# too for older workbooks — both map to the same DB column.)
 SOURCE_COLUMNS = {
     "Category": "category",
+    "Payment Date": "cheque_date",
     "Cheque Date": "cheque_date",
     "Cheque Number": "cheque_number",
     "Supplier Name": "supplier_name",
@@ -39,8 +41,8 @@ SOURCE_COLUMNS = {
     # Sum of VDS is intentionally excluded from import/field mapping/storage.
     # Base Amount / TDS Rate are optional: when both are present, TDS is
     # computed as Base Amount x TDS Rate instead of taken literally.
-    "Base Amount": "_base_amount",
-    "TDS Rate": "_tds_rate",
+    "Base Amount": "base_amount",
+    "TDS Rate": "tds_rate",
     "Match": "match",
     "Section": "section",
     "TIN": "tin",
@@ -53,8 +55,10 @@ SOURCE_COLUMNS = {
     "Remarks": "remarks",
 }
 
-REQUIRED_FIELDS = ["Supplier Name", "TIN", "Sum of TDS", "Month", "Section"]
-TIN_RE = re.compile(r"^\d{10,13}$")  # 12-digit standard; tolerate 10-13 legacy
+# Used only to locate which row is the header row in the sheet — not a
+# validation of the data itself. A sheet missing either of these has no
+# usable header to anchor on at all.
+HEADER_ANCHOR_FIELDS = ["Supplier Name", "TIN"]
 
 MONTH_RE = re.compile(r"^([A-Za-z]+)'(\d{2})$")
 _MONTHS = {m.lower(): i for i, m in enumerate(
@@ -119,12 +123,11 @@ def _clean(value):
 
 def _find_header_row(ws) -> int | None:
     """Locate the 0-based row index (within the first 10 rows) that looks like
-    the real header — i.e. contains every REQUIRED_FIELDS column name. Sheets
-    aren't guaranteed to include every SOURCE_COLUMNS field ('Category' in
-    particular is informational, not required, and some workbooks omit it),
-    so anchoring on the fields the import can't work without is what actually
-    generalizes across differently-trimmed templates."""
-    required = set(REQUIRED_FIELDS)
+    the real header — i.e. contains every HEADER_ANCHOR_FIELDS column name.
+    Sheets aren't guaranteed to include every SOURCE_COLUMNS field, so
+    anchoring on a couple of fields every workbook necessarily has is what
+    actually generalizes across differently-trimmed templates."""
+    required = set(HEADER_ANCHOR_FIELDS)
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True)):
         vals = {str(v).strip() if v is not None else "" for v in row}
         if required <= vals:
@@ -133,8 +136,8 @@ def _find_header_row(ws) -> int | None:
 
 
 def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str], list[dict]]:
-    """Read the Depot sheet, locating the header row that contains every
-    REQUIRED_FIELDS column name.
+    """Read the Depot sheet, locating the header row that contains the
+    HEADER_ANCHOR_FIELDS column names.
     Returns (columns, rows); each row is a dict of column name -> cell value,
     plus a 1-based '__excel_row' Excel row number."""
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
@@ -153,8 +156,8 @@ def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str
 
         if header_idx is None:
             raise ValueError(
-                "Could not find a header row containing all required columns: "
-                + ", ".join(REQUIRED_FIELDS)
+                "Could not find a header row containing: "
+                + ", ".join(HEADER_ANCHOR_FIELDS)
             )
 
         ws = wb[selected_sheet]
@@ -170,8 +173,7 @@ def load_depot_sheet(path: str, sheet_name: str = "Depot-SCB") -> tuple[list[str
         ):
             # Skip fully blank rows — common trailing padding from a
             # formatted-but-empty range (e.g. borders/column formatting
-            # applied far past the real data). They aren't data-entry
-            # mistakes, so they shouldn't count as import errors.
+            # applied far past the real data), not a data row.
             if all(v is None for v in values):
                 continue
             row = {columns[i]: (values[i] if i < len(values) else None) for i in range(len(columns))}
@@ -209,8 +211,8 @@ def _get_or_create_supplier(db: Session, cache: dict[str, Supplier], company_id:
 
 
 def import_depot_workbook(db: Session, path: str, filename: str, company_id: int) -> ImportBatch:
-    """Import the Depot-SCB sheet: validate row by row, persist good rows,
-    record errors for bad ones. Never aborts on a single bad row."""
+    """Import every row of the Depot-SCB sheet as-is — no validation, no
+    skipped/error rows. Missing or unparseable values are stored as null."""
     columns, rows = load_depot_sheet(path)
     batch = ImportBatch(company_id=company_id, filename=filename, kind="depot", total_rows=len(rows))
     db.add(batch)
@@ -224,89 +226,40 @@ def import_depot_workbook(db: Session, path: str, filename: str, company_id: int
           .filter(Supplier.company_id == company_id)
     }
 
-    ok = err = 0
     for row in rows:
-        excel_row = int(row["__excel_row"])
-        row_errors: list[tuple[str | None, str]] = []
-
         def val(col):
             return row.get(col)
 
-        # --- required fields ---
-        has_base_rate = (
-            _parse_number(val("Base Amount")) is not None
-            and _parse_number(val("TDS Rate")) is not None
-        )
-        for col in REQUIRED_FIELDS:
-            if col == "Sum of TDS" and has_base_rate:
-                continue  # TDS will be computed from Base Amount x TDS Rate instead
-            if _clean(val(col)) is None and _parse_number(val(col)) is None:
-                row_errors.append((col, f"Required field '{col}' is missing"))
-
-        # --- TIN format ---
         tin = _clean(val("TIN"))
-        if tin is not None:
-            tin = re.sub(r"\D", "", tin)
-            if not TIN_RE.match(tin):
-                row_errors.append(("TIN", f"TIN '{tin}' is not a valid 12-digit TIN"))
+        if tin:
+            tin = re.sub(r"\D", "", tin) or tin
 
-        # --- numeric fields ---
-        numbers = {}
-        for col in ("Sum of Bill Amount", "Sum of TDS", "Total Challan Amount",
-                    "Base Amount", "TDS Rate"):
-            v = val(col)
-            if v is not None and not (isinstance(v, float) and math.isnan(v)):
-                n = _parse_number(v)
-                if n is None:
-                    row_errors.append((col, f"'{v}' is not a number"))
-                numbers[col] = n
-            else:
-                numbers[col] = None
-
+        base_amount = _parse_number(val("Base Amount"))
+        tds_rate = _parse_number(val("TDS Rate"))
+        sum_of_tds = _parse_number(val("Sum of TDS"))
         # Base Amount x TDS Rate overrides the literal Sum of TDS column when
         # both are present and parse as numbers; otherwise Sum of TDS (already
         # based on Sum of Bill Amount upstream in the sheet) is used as-is.
-        if numbers["Base Amount"] is not None and numbers["TDS Rate"] is not None:
-            computed_tds = round(numbers["Base Amount"] * numbers["TDS Rate"], 2)
-        else:
-            computed_tds = numbers["Sum of TDS"]
+        computed_tds = round(base_amount * tds_rate, 2) if (base_amount is not None and tds_rate is not None) else sum_of_tds
 
-        # --- dates ---
-        cheque_date = _parse_date(val("Cheque Date"))
-        if _clean(val("Cheque Date")) and cheque_date is None:
-            row_errors.append(("Cheque Date", f"Unparseable date '{val('Cheque Date')}'"))
+        cheque_date = _parse_date(val("Payment Date") if "Payment Date" in columns else val("Cheque Date"))
         challan_date = _parse_date(val("Challan Date"))
-        if _clean(val("Challan Date")) and challan_date is None:
-            row_errors.append(("Challan Date", f"Unparseable date '{val('Challan Date')}'"))
-
         month_label = _clean(val("Month"))
         month_date = parse_month_label(month_label) if month_label else None
-        if month_label and month_date is None:
-            row_errors.append(("Month", f"Unparseable month label '{month_label}'"))
 
-        if row_errors:
-            err += 1
-            for col, msg in row_errors:
-                db.add(ImportRowError(
-                    batch_id=batch.id, row_number=excel_row, column=col,
-                    message=msg,
-                    raw_row=json.dumps(
-                        {k: str(v) for k, v in row.items() if k != "__excel_row"},
-                        default=str)[:4000],
-                ))
-            continue
-
-        supplier = _get_or_create_supplier(
-            db, supplier_cache, company_id, tin, _clean(val("Supplier Name")),
-            _clean(val("Supplier Address")), _clean(val("Email")),
-            _clean(val("WhatsApp No.")),
-        )
+        supplier = None
+        if tin:
+            supplier = _get_or_create_supplier(
+                db, supplier_cache, company_id, tin, _clean(val("Supplier Name")),
+                _clean(val("Supplier Address")), _clean(val("Email")),
+                _clean(val("WhatsApp No.")),
+            )
 
         basis = month_date or cheque_date
         txn = Transaction(
             company_id=company_id,
             batch_id=batch.id,
-            supplier_id=supplier.id,
+            supplier_id=supplier.id if supplier else None,
             category=_clean(val("Category")),
             cheque_date=cheque_date,
             cheque_number=_clean(val("Cheque Number")),
@@ -317,8 +270,10 @@ def import_depot_workbook(db: Session, path: str, filename: str, company_id: int
             email=_clean(val("Email")),
             depot_code=_clean(val("Depot Code")),
             description_of_payment=_clean(val("Description of Payment")),
-            sum_of_bill_amount=numbers["Sum of Bill Amount"],
+            sum_of_bill_amount=_parse_number(val("Sum of Bill Amount")),
             sum_of_tds=computed_tds,
+            base_amount=base_amount,
+            tds_rate=tds_rate,
             match=_clean(val("Match")),
             section=_clean(val("Section")),
             tin=tin,
@@ -327,14 +282,13 @@ def import_depot_workbook(db: Session, path: str, filename: str, company_id: int
             challan_date=challan_date,
             cheque_challan_sl=_clean(val("Cheque/Challan SL")),
             month=month_label,
-            total_challan_amount=numbers["Total Challan Amount"],
+            total_challan_amount=_parse_number(val("Total Challan Amount")),
             remarks=_clean(val("Remarks")),
             fiscal_year=fiscal_year_for(basis) if basis else None,
         )
         db.add(txn)
-        ok += 1
 
-    batch.ok_rows = ok
-    batch.error_rows = err
+    batch.ok_rows = len(rows)
+    batch.error_rows = 0
     db.commit()
     return batch

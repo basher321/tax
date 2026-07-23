@@ -10,7 +10,7 @@ The layout is LOCKED — it reproduces certificate_format.jpeg exactly:
     rule separating it from the "No." row
   * "No." row with certificate number left and issue date right
   * Payee block (rows 1-5): name, address, 12-digit TIN yes/no boxes,
-    E-TIN + period line
+    E-TIN + Payment Date line
   * Section 06 table: Sl | Date of Payment | Description of payment |
     Section | Amount of payment | Amount of tax deducted | Remarks
     (one row per actual payment line, no blank filler rows) + Total row
@@ -50,7 +50,6 @@ written to local disk — this backend runs on stateless/serverless hosting
 (e.g. Vercel), where each request can get a fresh, empty filesystem.
 """
 import io
-import os
 from datetime import date
 
 from reportlab.lib import colors
@@ -164,14 +163,6 @@ def _fmt_amt(v: float | None, decimals_if_needed=True) -> str:
     if abs(v - round(v)) < 0.005:
         return f"{round(v):,}"
     return f"{v:,.2f}"
-
-
-def _period_label(d_from: date | None, d_to: date | None) -> str:
-    def lab(d):
-        return d.strftime("%-d %b'%y") if os.name != "nt" else d.strftime("%#d %b'%y")
-    if d_from and d_to:
-        return f"From {lab(d_from)} to {lab(d_to)}"
-    return ""
 
 
 def _placeholder_box(label: str, w_mm: float, h_mm: float) -> Table:
@@ -305,8 +296,8 @@ def render_certificate_pdf(db, cert) -> None:
          "", f"Yes  [{yes_mark or '  '}]", "", f"No  [{no_mark or '  '}]"],
         ["4", Paragraph("Twelve-digit TIN (if answer of 03 is Yes)", P_CELL),
          "E-TIN", cert.tin or "", "", ""],
-        ["5", Paragraph("Period for which payment is made From (date) to (date)", P_CELL),
-         "", Paragraph(_period_label(cert.period_from, cert.period_to), P_CELL), "", ""],
+        ["5", Paragraph("Payment Date", P_CELL),
+         "", Paragraph(_fmt_date_long(cert.payment_date) if cert.payment_date else "", P_CELL), "", ""],
     ]
     payee_tbl = Table(
         payee_rows,

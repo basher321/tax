@@ -85,6 +85,9 @@ def generate_certificate(db: Session, company_id: int, tin: str, period: str) ->
         period=period,
         period_from=data.period_from,
         period_to=data.period_to,
+        # Row 5 "Payment Date" starts out at the period's end date — editable
+        # afterward from the certificate preview.
+        payment_date=data.period_to,
         total_payment=data.total_payment,
         total_tax_deducted=data.total_tax_deducted,
         total_vds=data.total_vds,
@@ -103,6 +106,7 @@ def generate_certificate(db: Session, company_id: int, tin: str, period: str) ->
             date_of_payment=ln.date_of_payment, description=ln.description,
             section=ln.section, amount_of_payment=ln.amount_of_payment,
             amount_of_tax_deducted=ln.amount_of_tax_deducted,
+            transaction_id=ln.transaction_id,
         ))
     for cl in data.challan_lines:
         db.add(CertificateChallanLine(
@@ -111,6 +115,7 @@ def generate_certificate(db: Session, company_id: int, tin: str, period: str) ->
             bank_name=cl.bank_name,
             total_challan_amount=cl.total_challan_amount,
             amount_related=cl.amount_related,
+            transaction_id=cl.transaction_id,
         ))
     db.flush()
 

@@ -30,6 +30,7 @@ class PaymentLine:                      # Section 06 row
     amount_of_payment: float | None
     amount_of_tax_deducted: float | None
     remarks: str | None = None
+    transaction_id: int | None = None   # source row, for edit-propagation
 
 
 @dataclass
@@ -41,6 +42,7 @@ class ChallanLine:                      # Section 07 row
     total_challan_amount: float | None
     amount_related: float | None
     remarks: str | None = None
+    transaction_id: int | None = None   # source row, for edit-propagation
 
 
 @dataclass
@@ -109,6 +111,7 @@ def build_certificate_data(
             section=t.section,
             amount_of_payment=t.sum_of_bill_amount,
             amount_of_tax_deducted=t.sum_of_tds,
+            transaction_id=t.id,
         ))
         # Section 07 — challan credit for the same row; "Amount relating to
         # this certificate" is the row's TDS (this is what makes the Section
@@ -120,6 +123,7 @@ def build_certificate_data(
             bank_name=t.bank_name or default_bank,
             total_challan_amount=t.total_challan_amount,
             amount_related=t.sum_of_tds,
+            transaction_id=t.id,
         ))
         data.total_payment += t.sum_of_bill_amount or 0.0
         data.total_tax_deducted += t.sum_of_tds or 0.0

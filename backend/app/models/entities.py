@@ -215,6 +215,12 @@ class Transaction(Base):
     # Legacy column — no longer populated by import/challan upload (VDS is
     # excluded from the pipeline); kept only so old rows keep their data.
     sum_of_vds: Mapped[float | None] = mapped_column(Float)
+    # Optional: when both are present, Sum of TDS is computed as Base Amount
+    # x TDS Rate instead of taken literally from the sheet. Stored as their
+    # own columns (not just used transiently) so the Import page can display
+    # them for an already-persisted row.
+    base_amount: Mapped[float | None] = mapped_column(Float)
+    tds_rate: Mapped[float | None] = mapped_column(Float)
     match: Mapped[str | None] = mapped_column(String(64))
     section: Mapped[str | None] = mapped_column(String(32), index=True)
     tin: Mapped[str | None] = mapped_column(String(20), index=True)
@@ -253,6 +259,11 @@ class Certificate(Base):
     period: Mapped[str] = mapped_column(String(9), index=True)  # fiscal year
     period_from: Mapped[date | None] = mapped_column(Date)
     period_to: Mapped[date | None] = mapped_column(Date)
+    # Row 5: a single editable Payment Date shown/printed on the certificate,
+    # replacing the "Period for which payment is made From/To" range display.
+    # period_from/period_to are kept as-is for grouping and the existing
+    # date-range search — this is a separate, user-facing field.
+    payment_date: Mapped[date | None] = mapped_column(Date)
     total_payment: Mapped[float] = mapped_column(Float, default=0)
     total_tax_deducted: Mapped[float] = mapped_column(Float, default=0)
     total_vds: Mapped[float] = mapped_column(Float, default=0)
@@ -292,6 +303,10 @@ class CertificateLine(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     certificate_id: Mapped[int] = mapped_column(ForeignKey("tds_certificates.id"))
+    # The Transaction row this line was generated from, when one exists —
+    # lets an in-place edit on the certificate propagate back to the
+    # original imported row shown on the Import page.
+    transaction_id: Mapped[int | None] = mapped_column(ForeignKey("tds_transactions.id"))
     sl: Mapped[int] = mapped_column(Integer)
     date_of_payment: Mapped[date | None] = mapped_column(Date)
     description: Mapped[str | None] = mapped_column(String(255))
@@ -310,6 +325,8 @@ class CertificateChallanLine(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     certificate_id: Mapped[int] = mapped_column(ForeignKey("tds_certificates.id"))
+    # Same purpose as CertificateLine.transaction_id above.
+    transaction_id: Mapped[int | None] = mapped_column(ForeignKey("tds_transactions.id"))
     sl: Mapped[int] = mapped_column(Integer)
     challan_number: Mapped[str | None] = mapped_column(String(64))
     challan_date: Mapped[date | None] = mapped_column(Date)

@@ -40,9 +40,13 @@ function Preview({ certId, onClose }) {
   const [emailBusy, setEmailBusy] = useState(false);
   const [dateMode, setDateMode] = useState("auto");
   const [manualDate, setManualDate] = useState("");
+  const [payeeForm, setPayeeForm] = useState({ name: "", address: "", tin: "" });
+  const [paymentDate, setPaymentDate] = useState("");
+  const [linesForm, setLinesForm] = useState([]);
+  const [challanForm, setChallanForm] = useState([]);
   // Cache-busts the certificate image below every time the server re-renders
-  // it, so edits (Remarks/TIN/date) are reflected immediately instead of
-  // showing a browser-cached copy of the old image at the same URL.
+  // it, so edits (Remarks/TIN/date/payee/lines) are reflected immediately
+  // instead of showing a browser-cached copy of the old image at the same URL.
   const [imgVersion, setImgVersion] = useState(0);
 
   const showNotice = (message, kind = "ok") => {
@@ -70,6 +74,10 @@ function Preview({ certId, onClose }) {
         setCert(c); setRemarks(c.remarks || ""); setAnomalies(a); setWaLinks(wa);
         setDateMode(c.issue_date_mode || "auto");
         setManualDate(c.issue_date || "");
+        setPayeeForm({ name: c.supplier.name || "", address: c.supplier.address || "", tin: c.tin || "" });
+        setPaymentDate(c.payment_date || "");
+        setLinesForm(c.lines.map((l) => ({ ...l })));
+        setChallanForm(c.challan_lines.map((cl) => ({ ...cl })));
         setImgVersion((v) => v + 1);
       }
     );
@@ -99,6 +107,55 @@ function Preview({ certId, onClose }) {
     setManualDate(c.issue_date || "");
     setImgVersion((v) => v + 1);
     showNotice("Issue date saved - certificate re-rendered.");
+  }
+
+  async function savePaymentDate() {
+    const c = await api.updatePaymentDate(certId, paymentDate || null);
+    setCert(c);
+    setPaymentDate(c.payment_date || "");
+    setImgVersion((v) => v + 1);
+    showNotice("Payment date saved - certificate re-rendered.");
+  }
+
+  async function savePayee() {
+    const c = await api.updatePayee(certId, payeeForm);
+    setCert(c);
+    setImgVersion((v) => v + 1);
+    showNotice("Payee details saved - certificate re-rendered, and the linked Import rows updated too.");
+  }
+
+  function setLineField(id, field, value) {
+    setLinesForm((prev) => prev.map((l) => (l.id === id ? { ...l, [field]: value } : l)));
+  }
+
+  function setChallanField(id, field, value) {
+    setChallanForm((prev) => prev.map((cl) => (cl.id === id ? { ...cl, [field]: value } : cl)));
+  }
+
+  async function saveLines() {
+    const c = await api.updateLines(certId, {
+      lines: linesForm.map((l) => ({
+        id: l.id,
+        date_of_payment: l.date_of_payment || null,
+        description: l.description,
+        section: l.section,
+        amount_of_payment: l.amount_of_payment === "" || l.amount_of_payment == null ? null : Number(l.amount_of_payment),
+        amount_of_tax_deducted: l.amount_of_tax_deducted === "" || l.amount_of_tax_deducted == null ? null : Number(l.amount_of_tax_deducted),
+      })),
+      challan_lines: challanForm.map((cl) => ({
+        id: cl.id,
+        challan_number: cl.challan_number,
+        challan_date: cl.challan_date || null,
+        bank_name: cl.bank_name,
+        total_challan_amount: cl.total_challan_amount === "" || cl.total_challan_amount == null ? null : Number(cl.total_challan_amount),
+        amount_related: cl.amount_related === "" || cl.amount_related == null ? null : Number(cl.amount_related),
+      })),
+    });
+    setCert(c);
+    setLinesForm(c.lines.map((l) => ({ ...l })));
+    setChallanForm(c.challan_lines.map((cl) => ({ ...cl })));
+    setImgVersion((v) => v + 1);
+    showNotice("Line items saved - certificate re-rendered, and the linked Import rows updated too.");
   }
 
   async function sendEmail() {
@@ -267,6 +324,18 @@ function Preview({ certId, onClose }) {
             </div>
           </div>
           <div>
+            <label className="label">Payee (Name of Payee / Address of Payee / E-TIN)</label>
+            <div className="grid grid-cols-3 gap-2">
+              <input className="input" placeholder="Name of Payee" value={payeeForm.name}
+                onChange={(e) => setPayeeForm({ ...payeeForm, name: e.target.value })} />
+              <input className="input" placeholder="Address of Payee" value={payeeForm.address}
+                onChange={(e) => setPayeeForm({ ...payeeForm, address: e.target.value })} />
+              <input className="input font-mono" placeholder="E-TIN" value={payeeForm.tin}
+                onChange={(e) => setPayeeForm({ ...payeeForm, tin: e.target.value })} />
+            </div>
+            <button className="btn-primary mt-2" onClick={savePayee}>Save payee</button>
+          </div>
+          <div>
             <label className="label">Does the payee have a Twelve-digit TIN?</label>
             <div className="flex items-center gap-4">
               <label className="flex items-center gap-1.5 cursor-pointer">
@@ -300,6 +369,101 @@ function Preview({ certId, onClose }) {
               )}
               <button className="btn-ghost" onClick={saveIssueDate}>Save date</button>
             </div>
+          </div>
+          <div>
+            <label className="label">Payment Date (row 05)</label>
+            <div className="flex items-center gap-2">
+              <input type="date" className="input !w-auto" value={paymentDate}
+                onChange={(e) => setPaymentDate(e.target.value)} />
+              <button className="btn-ghost" onClick={savePaymentDate}>Save payment date</button>
+            </div>
+          </div>
+          <div>
+            <label className="label">06. Particulars of the making of payment and the deduction of tax</label>
+            <div className="overflow-auto border border-rule rounded-md max-h-64">
+              <table className="tbl min-w-max">
+                <thead className="sticky top-0 z-10">
+                  <tr>
+                    <th>Sl</th><th>Date of Payment</th><th>Description</th><th>Section</th>
+                    <th>Amount of Payment</th><th>Amount of Tax Deducted</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {linesForm.map((l, i) => (
+                    <tr key={l.id}>
+                      <td>{i + 1}</td>
+                      <td>
+                        <input type="date" className="input" value={l.date_of_payment || ""}
+                          onChange={(e) => setLineField(l.id, "date_of_payment", e.target.value)} />
+                      </td>
+                      <td>
+                        <input className="input min-w-[10rem]" value={l.description || ""}
+                          onChange={(e) => setLineField(l.id, "description", e.target.value)} />
+                      </td>
+                      <td>
+                        <input className="input !w-16" value={l.section || ""}
+                          onChange={(e) => setLineField(l.id, "section", e.target.value)} />
+                      </td>
+                      <td>
+                        <input className="input font-mono !w-28" value={l.amount_of_payment ?? ""}
+                          onChange={(e) => setLineField(l.id, "amount_of_payment", e.target.value)} />
+                      </td>
+                      <td>
+                        <input className="input font-mono !w-28" value={l.amount_of_tax_deducted ?? ""}
+                          onChange={(e) => setLineField(l.id, "amount_of_tax_deducted", e.target.value)} />
+                      </td>
+                    </tr>
+                  ))}
+                  {linesForm.length === 0 && (
+                    <tr><td colSpan={6} className="p-3 text-ink/50">No payment lines on this certificate.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <label className="label">07. Payment of deducted tax to the credit of the Government</label>
+            <div className="overflow-auto border border-rule rounded-md max-h-64">
+              <table className="tbl min-w-max">
+                <thead className="sticky top-0 z-10">
+                  <tr>
+                    <th>Sl</th><th>Challan Number</th><th>Challan Date</th><th>Bank Name</th>
+                    <th>Total Challan Amount</th><th>Amount Relating</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {challanForm.map((cl, i) => (
+                    <tr key={cl.id}>
+                      <td>{i + 1}</td>
+                      <td>
+                        <input className="input min-w-[9rem]" value={cl.challan_number || ""}
+                          onChange={(e) => setChallanField(cl.id, "challan_number", e.target.value)} />
+                      </td>
+                      <td>
+                        <input type="date" className="input" value={cl.challan_date || ""}
+                          onChange={(e) => setChallanField(cl.id, "challan_date", e.target.value)} />
+                      </td>
+                      <td>
+                        <input className="input min-w-[8rem]" value={cl.bank_name || ""}
+                          onChange={(e) => setChallanField(cl.id, "bank_name", e.target.value)} />
+                      </td>
+                      <td>
+                        <input className="input font-mono !w-28" value={cl.total_challan_amount ?? ""}
+                          onChange={(e) => setChallanField(cl.id, "total_challan_amount", e.target.value)} />
+                      </td>
+                      <td>
+                        <input className="input font-mono !w-28" value={cl.amount_related ?? ""}
+                          onChange={(e) => setChallanField(cl.id, "amount_related", e.target.value)} />
+                      </td>
+                    </tr>
+                  ))}
+                  {challanForm.length === 0 && (
+                    <tr><td colSpan={6} className="p-3 text-ink/50">No challan lines on this certificate.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <button className="btn-primary mt-2" onClick={saveLines}>Save line items</button>
           </div>
         </div>
 
@@ -470,7 +634,7 @@ function BulkSendPanel({ results, onClose }) {
 /* ------------------------------------------------------------------ */
 export default function CertificateIssue() {
   const { companyId } = useCompany();
-  const [filters, setFilters] = useState({ tin: "", bin: "", supplier_name: "", date_from: "", date_to: "" });
+  const [filters, setFilters] = useState({ tin: "", bin: "", supplier_name: "", date_from: "", date_to: "", payment_date: "" });
   const [page, setPage] = useState(1);
   const [results, setResults] = useState({ items: [], total: 0 });
   const [pending, setPending] = useState([]);
@@ -489,7 +653,9 @@ export default function CertificateIssue() {
     // digits stored on the certificate — a copy-pasted TIN carrying a stray
     // leading/trailing space (common when pasted from Excel or a PDF) would
     // never match, so trim it here before it goes out.
-    return api.searchCertificates({ ...filters, tin: filters.tin.trim(), company_id: companyId, page: nextPage, page_size: 20 }).then(setResults);
+    // A large page size, so the certificate list below can show everything
+    // via scrolling instead of needing Next/Previous for the common case.
+    return api.searchCertificates({ ...filters, tin: filters.tin.trim(), company_id: companyId, page: nextPage, page_size: 500 }).then(setResults);
   };
   const loadPending = () => {
     if (!companyId) return Promise.resolve();
@@ -584,13 +750,14 @@ export default function CertificateIssue() {
       </div>
       {notice && <p className="text-sm text-ledger">{notice}</p>}
 
-      {/* Search & filter - TIN, BIN, Supplier Name, Date range (combinable) */}
-      <div className="card p-4 grid grid-cols-6 gap-3 items-end">
+      {/* Search & filter - TIN, BIN, Supplier Name, Date range, Payment Date (combinable) */}
+      <div className="card p-4 grid grid-cols-7 gap-3 items-end">
         <div><span className="label">TIN</span><input className="input font-mono" value={filters.tin} onChange={set("tin")} onKeyDown={submitOnEnter} /></div>
         <div><span className="label">BIN</span><input className="input font-mono" value={filters.bin} onChange={set("bin")} onKeyDown={submitOnEnter} /></div>
         <div><span className="label">Supplier name</span><input className="input" value={filters.supplier_name} onChange={set("supplier_name")} onKeyDown={submitOnEnter} /></div>
         <div><span className="label">Date from</span><input type="date" className="input" value={filters.date_from} onChange={set("date_from")} /></div>
         <div><span className="label">Date to</span><input type="date" className="input" value={filters.date_to} onChange={set("date_to")} /></div>
+        <div><span className="label">Payment date</span><input type="date" className="input" value={filters.payment_date} onChange={set("payment_date")} /></div>
         <button className="btn-primary" onClick={applyFilters}>Search</button>
       </div>
 
@@ -650,38 +817,41 @@ export default function CertificateIssue() {
             {bulkSending ? "Sending..." : "Send all"}
           </button>
         </div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-xs uppercase tracking-wide text-ink/50 border-b border-rule">
-              <th className="px-5 py-2">Certificate No.</th><th>Supplier</th><th>TIN</th>
-              <th>Period</th><th>Issued</th><th className="text-right">TDS</th><th>Status</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.items.map((c) => (
-              <tr key={c.id} className="border-b border-rule/60">
-                <td className="px-5 py-1.5 font-mono">{c.certificate_no}</td>
-                <td>{c.supplier.name}</td>
-                <td className="font-mono">{c.tin}</td>
-                <td>{c.period}</td>
-                <td>{c.issue_date}</td>
-                <td className="text-right font-mono">{fmt(c.total_tax_deducted)}</td>
-                <td><span className={`text-xs px-1.5 py-0.5 rounded ${c.status === "sent" ? "bg-ledger/10 text-ledger" : "bg-paper"}`}>{c.status}</span></td>
-                <td className="pr-4 text-right whitespace-nowrap">
-                  <button className="btn-ghost !py-0.5" onClick={() => exportOne(c.id)}>Export</button>
-                  <button className="btn-ghost !py-0.5" onClick={() => setPreviewId(c.id)}>Preview / send</button>
-                </td>
+        <div className="overflow-auto max-h-[70vh]">
+          <table className="w-full text-sm min-w-max">
+            <thead className="sticky top-0 z-10 bg-white">
+              <tr className="text-left text-xs uppercase tracking-wide text-ink/50 border-b border-rule">
+                <th className="px-5 py-2">Certificate No.</th><th>Supplier</th><th>TIN</th>
+                <th>Period</th><th>Issued</th><th>Payment date</th><th className="text-right">TDS</th><th>Status</th><th></th>
               </tr>
-            ))}
-            {results.items.length === 0 && (
-              <tr><td colSpan={8} className="p-5 text-ink/50">No certificates match these filters.</td></tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {results.items.map((c) => (
+                <tr key={c.id} className="border-b border-rule/60">
+                  <td className="px-5 py-1.5 font-mono">{c.certificate_no}</td>
+                  <td>{c.supplier.name}</td>
+                  <td className="font-mono">{c.tin}</td>
+                  <td>{c.period}</td>
+                  <td>{c.issue_date}</td>
+                  <td>{c.payment_date || ""}</td>
+                  <td className="text-right font-mono">{fmt(c.total_tax_deducted)}</td>
+                  <td><span className={`text-xs px-1.5 py-0.5 rounded ${c.status === "sent" ? "bg-ledger/10 text-ledger" : "bg-paper"}`}>{c.status}</span></td>
+                  <td className="pr-4 text-right whitespace-nowrap">
+                    <button className="btn-ghost !py-0.5" onClick={() => exportOne(c.id)}>Export</button>
+                    <button className="btn-ghost !py-0.5" onClick={() => setPreviewId(c.id)}>Preview / send</button>
+                  </td>
+                </tr>
+              ))}
+              {results.items.length === 0 && (
+                <tr><td colSpan={9} className="p-5 text-ink/50">No certificates match these filters.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
         <div className="px-5 py-2 flex gap-2 items-center text-sm">
           <button className="btn-ghost" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button>
-          <span>Page {page} of {Math.max(1, Math.ceil(results.total / 20))}</span>
-          <button className="btn-ghost" disabled={page * 20 >= results.total} onClick={() => setPage(page + 1)}>Next</button>
+          <span>Page {page} of {Math.max(1, Math.ceil(results.total / 500))}</span>
+          <button className="btn-ghost" disabled={page * 500 >= results.total} onClick={() => setPage(page + 1)}>Next</button>
         </div>
       </div>
 

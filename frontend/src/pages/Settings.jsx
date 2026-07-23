@@ -450,10 +450,6 @@ export default function Settings() {
           <Field label="Designation"><input className="input" value={companyForm.officer_designation || ""} onChange={setC("officer_designation")} /></Field>
           <Field label="Officer email"><input className="input" value={companyForm.officer_email || ""} onChange={setC("officer_email")} /></Field>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Default bank name (Section 07)"><input className="input" value={companyForm.default_bank_name || ""} onChange={setC("default_bank_name")} /></Field>
-          <Field label="Default payment description (Section 06)"><input className="input" value={companyForm.default_description || ""} onChange={setC("default_description")} /></Field>
-        </div>
         <button className="btn-primary" onClick={() => saveCompany("Seal & officer details saved.")}>Save seal &amp; officer details</button>
       </section>
 
